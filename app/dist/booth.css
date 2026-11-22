@@ -205,6 +205,53 @@ html[lang="en"] .booth-opinion-en{display:block}
 #booth-live-page{font-family:var(--ev-sans);font-size:12.5px;letter-spacing:0}
 .booth-hist-row.pass .r{color:var(--ev-pass)}
 .booth-hist-row.fail .r{color:var(--ev-fail)}
+
+/* Optional gallery consent & leaderboard/gallery (v2) */
+.booth-consent-opt-box{display:grid;gap:6px;padding:12px;border:1px solid var(--ev-hair);border-radius:8px;background:var(--ev-soft)}
+.booth-consent-opt{display:flex;align-items:flex-start;gap:10px;min-height:44px;padding:4px 0;font-size:13.5px;line-height:1.5;color:var(--ev-ink);cursor:pointer}
+.booth-consent-opt input[type=checkbox]{flex:none;width:20px;height:20px;margin:2px 0 0;accent-color:var(--ev-ink);cursor:pointer}
+.booth-ticket-consent{gap:8px}
+.booth-lb-teaser{display:grid;gap:8px}
+.booth-lb{display:grid;gap:14px;min-width:0}
+.booth-lb-head{display:grid;gap:6px}
+.booth-lb-summary{display:grid;gap:12px;min-width:0}
+.booth-lb-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.booth-lb-kpi{display:grid;gap:4px;padding:12px 14px;background:var(--ev-card);border-radius:10px;box-shadow:0 1px 0 rgba(22,25,30,.04);min-width:0}
+.booth-lb-kpi-val{font-size:24px;font-weight:500;line-height:1.2;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.booth-lb-groups{display:grid;gap:12px;min-width:0}
+.booth-lb-group{gap:10px}
+.booth-lb-bar-row{display:grid;gap:5px}
+.booth-lb-bar-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:13px}
+.booth-lb-bar-name{color:var(--ev-ink);overflow-wrap:anywhere}
+.booth-lb-bar-track{height:6px;border-radius:999px;background:var(--ev-soft);overflow:hidden}
+.booth-lb-bar-fill{display:block;height:100%;border-radius:999px;background:var(--ev-pass)}
+.booth-lb-conq-list{display:flex;flex-wrap:wrap;gap:8px}
+.booth-lb-conq-chip{display:inline-grid;gap:2px;padding:8px 10px;border:1px solid var(--ev-hair);border-radius:8px;background:var(--ev-soft);max-width:100%}
+.booth-lb-conq-chip b{font-size:12.5px;font-weight:500;color:var(--ev-ink);overflow-wrap:anywhere}
+.booth-lb-conq-chip small{font-family:var(--ev-mono);font-size:11px;color:var(--ev-muted)}
+.booth-lb-mine{gap:12px}
+.booth-lb-mine-item{display:grid;gap:8px;min-width:0}
+.booth-lb-mine-item+.booth-lb-mine-item{padding-top:12px;border-top:1px solid var(--ev-hair)}
+.booth-lb-mine-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:6px 10px}
+.booth-lb-mine-edit{display:grid;gap:4px;min-width:0}
+.booth-lb-gate{gap:10px}
+.booth-lb-gate-title{font-size:18px;font-weight:600;line-height:1.35;color:var(--ev-ink)}
+.booth-lb-gate-actions{margin-top:4px}
+.booth-lb-feed{display:grid;gap:12px;min-width:0}
+.booth-lb-feed-head{display:grid;gap:4px}
+.booth-lb-list{display:grid;gap:12px;min-width:0}
+.booth-lb-card{gap:10px}
+.booth-lb-card.is-example{border:1px dashed var(--ev-line)}
+.booth-lb-card-title{font-size:15px;font-weight:600;line-height:1.4;color:var(--ev-ink);overflow-wrap:anywhere}
+.booth-lb-badges{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.booth-lb-pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:500;line-height:1.4;white-space:nowrap;background:var(--ev-soft);color:var(--ev-ink-2)}
+.booth-lb-pill.pass{background:rgba(47,91,79,.12);color:var(--ev-pass)}
+.booth-lb-pill.fail{background:rgba(138,48,48,.09);color:var(--ev-fail)}
+.booth-lb-pill.wait{background:var(--ev-soft);color:var(--ev-muted)}
+.booth-lb-pill.mine{background:var(--ev-ink);color:#fff}
+.booth-lb-pill.example{border:1px solid var(--ev-line);background:var(--ev-card);color:var(--ev-ink)}
+.booth-lb-edit-meta{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px}
+.booth-lb-dtype{padding:1px 7px;border:1px solid var(--ev-hair);border-radius:4px;font-size:11px;color:var(--ev-ink-2)}
 @keyframes booth-slide{from{transform:translateX(-100%)}to{transform:translateX(295%)}}
 @keyframes booth-press{from{transform:rotate(-7deg) scale(1.08)}to{transform:rotate(-7deg) scale(1)}}
 @media (prefers-reduced-motion:reduce){
@@ -250,6 +297,7 @@ html[lang="en"] .booth-opinion-en{display:block}
 .booth-desk-steps li.on{color:var(--ev-ink);font-weight:600}
 .booth-desk-steps li.done{color:var(--ev-ink-2)}
 .booth .booth-desk-rec{display:inline-flex;align-items:center;min-height:44px;margin-left:28px;padding-left:20px;border-left:1px solid var(--ev-hair);color:var(--ev-ink-2);font-size:13px;text-decoration:none;white-space:nowrap}
+.booth .booth-desk-rec:not([hidden])+.booth-desk-rec{margin-left:16px;padding-left:0;border-left:0}
 .booth .booth-desk-rec:hover{color:var(--ev-ink)}
 
 /* pick (D1): 440px intro, mission column. */
@@ -286,6 +334,10 @@ html[lang="en"] .booth-opinion-en{display:block}
 .booth #booth-search-q{background:var(--ev-card);font-size:14px}
 .booth #booth-search-go{min-width:76px}
 #booth-result{max-width:560px}
+.booth-lb-kpis{grid-template-columns:repeat(4,minmax(0,1fr))}
+.booth-lb-groups{grid-template-columns:repeat(3,minmax(0,1fr));align-items:start}
+.booth-lb-list{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+.booth-lb-gate{max-width:620px}
 
 /* edit (D2): the hint card sits in the work column (placed by event-theme.css); the dock spans the viewport. */
 .booth-hint{padding:14px 18px;background:var(--ev-card);border-radius:10px;font-size:14px;color:var(--ev-ink-2)}

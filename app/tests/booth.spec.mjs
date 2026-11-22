@@ -442,9 +442,31 @@ function liveBooth(options = {}) {
       body: typeof init.body === 'string' ? JSON.parse(init.body) : queryBody, form, signal: init.signal || null});
     if (path.endsWith('/v1/booth/config')) {
       if (options.configGate) await options.configGate;
-      return reply(200, {enabled: true, submissionsOpen: true, announcement: options.announcement, consentVersion: options.consentVersion || '2026-11-22.v2',
+      const cfg = {enabled: true, submissionsOpen: true, announcement: options.announcement, consentVersion: options.consentVersion || '2026-11-22.v2',
         limits: {maxDeclared: options.maxDeclared || 5, maxReason: 500, maxNickname: 24, perOwner: options.perOwner || 5, maxPdfBytes: 16777216},
-        missions: options.missions || MISSIONS});
+        missions: options.missions || MISSIONS};
+      if (options.features) cfg.features = options.features;
+      if (headers.Authorization && options.ownerState) {
+        cfg.ownerState = typeof options.ownerState === 'function' ? options.ownerState() : options.ownerState;
+      }
+      return reply(200, cfg);
+    }
+    if (path.endsWith('/v1/booth/leaderboard/summary')) {
+      if (options.summaryReply) return typeof options.summaryReply === 'function' ? options.summaryReply(full) : reply(200, options.summaryReply);
+      return reply(404, {error: {code: 'not_found'}});
+    }
+    if (path.endsWith('/v1/booth/leaderboard/unlock')) {
+      if (options.unlockReply) return typeof options.unlockReply === 'function' ? options.unlockReply() : reply(200, options.unlockReply);
+      return reply(200, {unlocked: true});
+    }
+    if (path.endsWith('/v1/booth/leaderboard')) {
+      if (options.leaderboardReply) return typeof options.leaderboardReply === 'function' ? options.leaderboardReply(full, query) : reply(200, options.leaderboardReply);
+      return reply(200, {entries: [], nextCursor: null});
+    }
+    if (path.endsWith('/v1/booth/gallery-consent')) {
+      const body = typeof init.body === 'string' ? JSON.parse(init.body) : {};
+      if (options.consentReply) return typeof options.consentReply === 'function' ? options.consentReply(body) : reply(200, options.consentReply);
+      return reply(200, {galleryConsent: body.galleryConsent === true});
     }
     if (path.endsWith('/v1/booth/claim') || path.endsWith('/v1/booth/withdraw')) {
       const next = path.endsWith('/v1/booth/withdraw') ? options.withdrawn : (claims.length > 1 ? claims.shift() : claims[0]);
@@ -551,7 +573,7 @@ test('the booth mounts only when enabled and starts on pick', async () => {
   assert.equal(h.text('booth-title'), 'AI를 속일 수있을까요?');
   assert.equal(nodesOf(h.ids.get('booth-title')).find(node => node.tagName === 'b').textContent, '속일 수');
   assert.match(h.text('booth-step-pick'), /AI REVIEW CHALLENGE/);
-  assert.match(h.text('booth-step-pick'), /공개 논문을 몰래 고쳐 보세요\. AI가 보통 1~3분 안에 찾아내는지 겨뤄요\. 심은 결함 중 하나라도 AI가 놓치면 부스에서 선물을 드려요\./);
+  assert.match(h.text('booth-step-pick'), /공개 논문을 몰래 고쳐 보세요\. AI가 보통 1~3분 안에 찾아내는지 겨뤄요\. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분\(1인 1회\)께 부스에서 선물을 드려요\./);
   assert.doesNotMatch(h.text('booth-step-pick'), /2분 안에/);
   assert.match(h.text('booth-step-pick'), /01논문 고르기.*02몰래 고치기.*03AI 검증/);
   assert.equal(h.text('booth-search-box').startsWith('다른 공개 논문 직접 찾기'), true);
@@ -1358,7 +1380,7 @@ test('the 최종 추첨 panel shows only when the AI missed, and the stub carrie
     assert.equal(h.step(), 'ticket');
     assert.equal(h.ids.get('booth-final').hidden, outcome !== 'missed', outcome);
     assert.equal(h.ids.get('booth-final').className, 'booth-panel booth-final', 'phones see the draw card too');
-    assert.equal(h.text('booth-final'), '최종 추첨마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.');
+    assert.equal(h.text('booth-final'), '최종 추첨현장 선착순 30명 선물과 별도로, 마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.');
     assert.equal(h.ids.get('booth-live-records').hidden, false);
     assert.equal(h.text('booth-stub-receipt'), 'F-0042');
     assert.equal(deskSteps(h), 'done:false done:false on:step');
@@ -2562,7 +2584,7 @@ test('per-defect resultView headlines, status labels, rule line and fallback whe
   });
   await settle();
   // Send screen has the rule line near the submit button.
-  assert.equal(h.text('booth-send-rule'), '심은 결함 중 하나라도 AI가 놓치면 성공이에요.');
+  assert.equal(h.text('booth-send-rule'), '심은 결함 중 하나라도 AI가 놓치면 성공이에요. 현장 선물은 먼저 승리한 선착순 30분(1인 1회)께 드려요.');
 
   // 4 edits, 1 missed -> count headline, rule line, and 4 matched status labels with aria-label.
   h.ids.get('booth-claim-receipt').value = 'F-0101';
@@ -2571,7 +2593,7 @@ test('per-defect resultView headlines, status labels, rule line and fallback whe
   await settle();
   assert.equal(h.text('booth-live-title'), '4개 중 1개가 AI 눈을 피했어요');
   assert.equal(h.ids.get('booth-live-rule').hidden, false);
-  assert.equal(h.text('booth-live-rule'), '심은 결함 중 하나라도 AI가 놓치면 성공이에요.');
+  assert.equal(h.text('booth-live-rule'), '심은 결함 중 하나라도 AI가 놓치면 성공이에요. 현장 선물은 먼저 승리한 선착순 30분(1인 1회)께 드려요.');
   const badges = nodesOf(h.ids.get('booth-live-declared')).filter(node => String(node.className || '').startsWith('booth-edit-verdict'));
   assert.deepEqual(badges.map(node => [node.textContent, node.getAttribute('aria-label'), node.className]), [
     ['AI가 찾음', 'AI가 찾음', 'booth-edit-verdict caught'],
@@ -3606,4 +3628,265 @@ test('optional AI or recipe errors never block manual editing and submission', a
   } finally {
     delete boothContext.FalsifyBoothRecipe;
   }
+});
+
+test('v2 gallery opt-in: default unchecked, omitted on old Worker, preserved across consent_outdated retry, and ticket toggle', async () => {
+  // 1. Old Worker (no features) omits meta.galleryConsent and keeps gallery UI hidden.
+  const legacy = liveBooth();
+  await settle();
+  assert.equal(legacy.ids.get('booth-desk-leaderboard').hidden, true);
+  assert.equal(legacy.ids.get('booth-lb-teaser').hidden, true);
+  assert.equal(legacy.ids.get('booth-gallery-consent-wrap').hidden, true);
+  await reachSend(legacy);
+  await submit(legacy);
+  const legacyMeta = JSON.parse(legacy.calls.find(c => c.path.endsWith('/v1/booth/submissions')).form.get('meta'));
+  assert.equal('galleryConsent' in legacyMeta, false, 'old Worker must not receive galleryConsent');
+  assert.equal(legacy.ids.get('booth-ticket-consent').hidden, true);
+  legacy.handle.destroy();
+
+  // 2. Gallery enabled: default unchecked, consent_outdated auto-retry never upgrades to true, ticket toggle works & reverts on error.
+  let consentToggleFail = false;
+  let ticketConsentState = false;
+  const h = liveBooth({
+    perOwner: 3,
+    features: {gallery: true, forfeit: true, paperBlock: false},
+    consentVersion: '2026-11-22.v3',
+    submits: [
+      {status: 409, body: {error: {code: 'consent_outdated'}}},
+      {status: 201, body: {receipt: 'F-0201', claimKey: '7Q3K-M9XD', status: 'received', course: 'quick', declaredCount: 1, createdAt: '2026-11-22T01:00:30Z'}},
+    ],
+    claims: [
+      {receipt: 'F-0201', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'missed',
+        publicNote: 'AI가 놓쳤어요', prizeMessage: '부스에서 선물을 받아 가세요', galleryConsent: false, publishedAt: '2026-11-22T01:02:00Z'},
+    ],
+    consentReply: body => {
+      if (consentToggleFail) return {ok: false, status: 500, headers: {get() { return null; }}, json: async () => ({error: {code: 'internal_error'}})};
+      ticketConsentState = body.galleryConsent === true;
+      return {ok: true, status: 200, headers: {get() { return null; }}, json: async () => ({galleryConsent: ticketConsentState})};
+    },
+  });
+  await settle();
+  assert.equal(h.ids.get('booth-desk-leaderboard').hidden, false);
+  assert.equal(h.ids.get('booth-lb-teaser').hidden, false);
+  assert.equal(h.ids.get('booth-gallery-consent-wrap').hidden, false);
+  assert.equal(h.ids.get('booth-gallery-consent').checked, false, 'gallery consent checkbox starts unchecked');
+  // Boot never sends bearer to /v1/booth/config (ownerState is explicit click only).
+  assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/config') && c.auth).length, 0);
+
+  await reachSend(h);
+  // Simulate server bumping consentVersion before submit -> retry must keep galleryConsent: false.
+  await submit(h);
+  const subCalls = h.calls.filter(c => c.path.endsWith('/v1/booth/submissions'));
+  assert.equal(subCalls.length, 1);
+  // First call got 409; refreshConsentVersion returned same v3 so didn't retry. Verify direct unchecked submit payload:
+  assert.equal(JSON.parse(subCalls[0].form.get('meta')).galleryConsent, false);
+
+  // Submit cleanly with unchecked default, then verify ticket gift/final copy and opt-in toggle.
+  await submit(h);
+  assert.equal(h.step(), 'ticket');
+  assert.equal(h.ids.get('booth-ticket-consent').hidden, false);
+  assert.equal(h.ids.get('booth-ticket-consent-input').checked, false);
+  assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/leaderboard/unlock')).length, 0);
+
+  // Toggle ON on ticket -> calls POST /v1/booth/gallery-consent with claim auth (no bearer), never unlocks leaderboard.
+  h.ids.get('booth-ticket-consent-input').checked = true;
+  h.ids.get('booth-ticket-consent-input').dispatchEvent({type: 'change'});
+  await settle();
+  const consentCalls = h.calls.filter(c => c.path.endsWith('/v1/booth/gallery-consent'));
+  assert.equal(consentCalls.length, 1);
+  assert.equal(consentCalls[0].auth, '');
+  assert.deepEqual(consentCalls[0].body, {receipt: 'F-0201', claimKey: '7Q3K-M9XD', galleryConsent: true});
+  assert.equal(h.ids.get('booth-ticket-consent-input').checked, true);
+  assert.match(h.text('booth-ticket-consent-status'), /공개하도록 바꿨어요/);
+  assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/leaderboard/unlock')).length, 0);
+
+  // Toggle OFF fails -> reverts checkbox cleanly.
+  consentToggleFail = true;
+  h.ids.get('booth-ticket-consent-input').checked = false;
+  h.ids.get('booth-ticket-consent-input').dispatchEvent({type: 'change'});
+  await settle();
+  assert.equal(h.ids.get('booth-ticket-consent-input').checked, true, 'checkbox reverts on server error');
+
+  // Verify first-30 gift notice and separate final raffle notice on ticket after claim settles.
+  await h.tick();
+  assert.match(h.text('booth-gift'), /먼저 승리한 선착순 30분께 부스에서 드려요/);
+  assert.match(h.text('booth-final'), /현장 선착순 30명 선물과 별도로/);
+  h.handle.destroy();
+});
+
+test('v2 leaderboard: explicit ownerState, cancel/back safety, forfeit/3-try unlock, withdraw lock, staff example, and 5-edit evidence cards', async () => {
+  const summary = {
+    judged: 12, missed: 3, pending: 2, conqueredCount: 2,
+    bySource: {mission: {judged: 9, missed: 2}, arxiv: {judged: 3, missed: 1}},
+    byDefectType: {number: {judged: 6, missed: 1}, logic: {judged: 4, missed: 2}},
+    byAssist: {manual: {judged: 8, missed: 2}, 'my-ai': {judged: 4, missed: 1}},
+    conqueredPapers: [{paperKey: '2309.15217', title: 'Ragas: Automated Evaluation'}],
+  };
+  let unlocked = false;
+  let used = 1;
+  let lbPage = 0;
+  const fiveEdits = [0, 1, 2, 3, 4].map(i => ({
+    index: i,
+    pageIndex: i + 1,
+    defectType: i % 2 === 0 ? 'number' : 'logic',
+    before: 'original value ' + (i + 1) + ' was 0.95',
+    after: 'original value ' + (i + 1) + ' was 0.50',
+    verdict: i === 4 ? 'missed' : (i === 3 ? 'partial' : 'caught'),
+    ...(i < 4 ? {evidence: {quote: 'Quote #' + (i + 1), rationale: '한글 근거 ' + (i + 1), rationaleEn: 'English rationale ' + (i + 1)}} : {}),
+  }));
+  const page1 = {
+    entries: [{
+      receipt: 'F-9999', // must never be rendered on another visitor's card
+      paperKey: '2309.15217',
+      paper: {id: '2309.15217v2', title: 'Ragas: Automated Evaluation', source: 'mission', license: 'cc-by-4.0'},
+      round: 'final', outcome: 'missed', assist: 'my-ai',
+      edits: fiveEdits,
+    }],
+    nextCursor: 'cur-2',
+  };
+  const page2 = {
+    entries: [{
+      paperKey: '2401.12345',
+      paper: {id: '2401.12345v1', title: 'Another Paper', source: 'arxiv', license: 'cc0-1.0'},
+      round: 'live', outcome: 'caught', assist: 'manual',
+      edits: [{index: 0, pageIndex: 0, defectType: 'method', before: 'N=100', after: 'N=10', verdict: 'caught',
+        evidence: {quote: 'N=10', rationale: '표본 수 불일치', rationaleEn: 'Sample count mismatch'}}],
+    }],
+    nextCursor: null,
+  };
+  const storage = memoryStorage();
+  storage.setItem(booth.RECEIPT_KEY, JSON.stringify([{
+    receipt: 'F-0100', claimKey: '7Q3K-M9XD', createdAt: '2026-11-22T01:00:00Z',
+    title: 'Ragas: Automated Evaluation', pages: [5], count: 1,
+    edits: [{page: 5, before: '0.95', after: '0.50'}], outcome: 'caught',
+  }]));
+
+  // A) Early unlock with forfeit=true: cancel does not unlock; confirm unlocks, ends new tries even after withdraw.
+  const h = liveBooth({
+    storage, perOwner: 3,
+    features: {gallery: true, forfeit: true, paperBlock: false},
+    ownerState: () => ({used, perOwner: 3, unlocked}),
+    summaryReply: summary,
+    unlockReply: () => { unlocked = true; return {ok: true, status: 200, headers: {get() { return null; }}, json: async () => ({unlocked: true})}; },
+    leaderboardReply: (_full, query) => {
+      lbPage += 1;
+      const body = query && query.get('cursor') === 'cur-2' ? page2 : (lbPage === 1 ? {entries: [], nextCursor: null} : page1);
+      return {ok: true, status: 200, headers: {get() { return null; }}, json: async () => body};
+    },
+    withdrawn: {receipt: 'F-0100', status: 'withdrawn', course: 'quick', declaredCount: 1, published: false},
+    claims: [{receipt: 'F-0100', status: 'judged', course: 'quick', declaredCount: 1, published: true, outcome: 'caught', publicNote: 'note', galleryConsent: false}],
+  });
+  await settle();
+  // Summary loaded publicly on pick without minting guest session.
+  assert.match(h.text('booth-lb-teaser-stats'), /정복 2편 · 판정 12건 · LIVE 통과율 25%/);
+  assert.equal(h.calls.filter(c => c.auth).length, 0, 'cold pick mints no guest session');
+
+  // Fresh receipt (<15m) resumes ticket; opening leaderboard from ticket & cancelling returns cleanly to ticket.
+  assert.equal(h.step(), 'ticket');
+  h.ids.get('booth-live-leaderboard').click();
+  await settle();
+  assert.equal(h.location.hash, '#booth-leaderboard');
+  assert.equal(h.ids.get('booth-leaderboard').hidden, false);
+  assert.equal(h.ids.get('booth-lb-gate').hidden, false);
+  assert.equal(h.ids.get('booth-lb-feed').hidden, true);
+  assert.equal(h.text('booth-lb-unlock-go'), '기회 2번 포기하고 보기');
+  assert.match(h.text('booth-lb-summary'), /추천 미션.*외부 arXiv/);
+
+  // Cancel -> returns to ticket WITHOUT calling unlock!
+  h.ids.get('booth-lb-unlock-cancel').click();
+  await settle();
+  assert.equal(h.step(), 'ticket');
+  assert.equal(h.ids.get('booth-leaderboard').hidden, true);
+  assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/leaderboard/unlock')).length, 0);
+
+  // Move to pick, open leaderboard from pick, cancel returns cleanly to pick landing.
+  h.ids.get('booth-live-again').click();
+  assert.equal(h.step(), 'pick');
+  h.ids.get('booth-pick-leaderboard').click();
+  await settle();
+  h.ids.get('booth-lb-unlock-cancel').click();
+  await settle();
+  assert.equal(h.ids.get('booth-leaderboard').hidden, true);
+  assert.equal(h.ids.get('booth-landing').hidden, false);
+  assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/leaderboard/unlock')).length, 0);
+
+  // Reopen & confirm unlock -> first response has empty entries -> shows 1 curated 운영진 예시 card.
+  h.ids.get('booth-pick-leaderboard').click();
+  await settle();
+  h.ids.get('booth-lb-unlock-go').click();
+  await settle();
+  assert.equal(h.calls.filter(c => c.path.endsWith('/v1/booth/leaderboard/unlock')).length, 1);
+  assert.equal(h.ids.get('booth-lb-feed').hidden, false);
+  assert.equal(h.ids.get('booth-lb-example-note').hidden, false);
+  assert.match(h.text('booth-lb-list'), /운영진 예시/);
+
+  // Reopen leaderboard (now unlocked) -> loads 5-edit entry + nextCursor pagination!
+  h.ids.get('booth-lb-back').click();
+  h.ids.get('booth-pick-leaderboard').click();
+  await settle();
+  assert.equal(h.ids.get('booth-lb-example-note').hidden, true);
+  const feedText = h.text('booth-lb-list');
+  assert.equal(feedText.includes('F-9999'), false, 'other visitors cards never display receipt numbers');
+  assert.match(feedText, /FINAL 판정/);
+  assert.match(feedText, /내 AI/);
+  assert.match(feedText, /내가 도전한 논문/);
+  for (let i = 1; i <= 5; i += 1) {
+    assert.match(feedText, new RegExp('결함 ' + i + ' · ' + (i + 1) + '쪽'), 'renders edit #' + i + ' with 1-based page');
+  }
+  for (let i = 1; i <= 4; i += 1) {
+    assert.match(feedText, new RegExp('Quote #' + i));
+    assert.match(feedText, new RegExp('한글 근거 ' + i));
+    assert.match(feedText, new RegExp('English rationale ' + i));
+  }
+  assert.equal(h.ids.get('booth-lb-more').hidden, false);
+  h.ids.get('booth-lb-more').click();
+  await settle();
+  assert.match(h.text('booth-lb-list'), /Another Paper/);
+  assert.equal(h.ids.get('booth-lb-more').hidden, true);
+
+  // After confirmed unlock, withdrawing an earlier ticket keeps chances at 0.
+  h.ids.get('booth-claim-receipt').value = 'F-0100';
+  h.ids.get('booth-claim-key').value = '7Q3K-M9XD';
+  h.ids.get('booth-claim-form').dispatchEvent({type: 'submit', preventDefault() {}});
+  await settle();
+  assert.equal(h.text('booth-chances-top'), '기회 0번 남음');
+  h.ids.get('booth-withdraw').click();
+  h.ids.get('booth-withdraw-confirm').click();
+  await settle();
+  assert.equal(h.text('booth-chances-top'), '기회 0번 남음', 'withdraw after confirmed unlock does not restore a new try');
+  h.handle.destroy();
+
+  // B) forfeit=false with remaining tries hides early unlock button; used>=perOwner shows explicit gallery open button.
+  const locked = liveBooth({
+    perOwner: 3,
+    features: {gallery: true, forfeit: false, paperBlock: false},
+    ownerState: {used: 1, perOwner: 3, unlocked: false},
+    summaryReply: summary,
+  });
+  await settle();
+  locked.ids.get('booth-pick-leaderboard').click();
+  await settle();
+  assert.equal(locked.ids.get('booth-lb-unlock-go').hidden, true, 'forfeit OFF blocks early unlock');
+  assert.match(locked.text('booth-lb-gate-copy'), /도전 기회 3번을 모두 쓰면/);
+  locked.handle.destroy();
+
+  const fullDone = liveBooth({
+    perOwner: 3,
+    features: {gallery: true, forfeit: false, paperBlock: false},
+    ownerState: {used: 3, perOwner: 3, unlocked: false},
+    summaryReply: summary,
+    submits: [{status: 403, body: {error: {code: 'leaderboard_forfeited'}}}],
+  });
+  await settle();
+  fullDone.ids.get('booth-pick-leaderboard').click();
+  await settle();
+  assert.equal(fullDone.ids.get('booth-lb-unlock-go').hidden, false, 'used>=perOwner allows explicit open even with forfeit OFF');
+  assert.equal(fullDone.text('booth-lb-unlock-go'), '결함 갤러리 열기');
+  // Go back to pick and verify leaderboard_forfeited error on submit shows clear notice + records button.
+  fullDone.ids.get('booth-lb-unlock-cancel').click();
+  await reachSend(fullDone);
+  await submit(fullDone);
+  assert.match(fullDone.text('booth-submit-status'), /래더보드를 먼저 열어 새 도전이 종료됐어요/);
+  assert.equal(fullDone.ids.get('booth-submit-records').hidden, false);
+  fullDone.handle.destroy();
 });

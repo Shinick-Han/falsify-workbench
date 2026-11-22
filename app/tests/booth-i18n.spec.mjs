@@ -520,10 +520,45 @@ test('booth.js PDF open error sentences translate cleanly to English with no Han
   const boothCtx = vm.createContext({console, URL, URLSearchParams});
   vm.runInContext(boothSource, boothCtx, {filename: 'booth.js'});
   i18n.setLang('en');
-  for (const code of ['pdf_encrypted', 'pdf_corrupt', 'pdf_empty_text', 'pdf_timeout', 'pdf_unreadable']) {
+  for (const code of ['pdf_encrypted', 'pdf_corrupt', 'pdf_empty_text', 'pdf_timeout', 'pdf_unreadable', 'leaderboard_forfeited', 'leaderboard_locked', 'paper_conquered']) {
     const ko = boothCtx.FalsifyBooth.errorMessage(code);
     const en = i18n.t(ko);
     assert.notEqual(en, ko, `missing EN translation for ${code}: ${ko}`);
     assert.doesNotMatch(en, /[가-힣]/, `Hangul leaked for ${code}: ${en}`);
+  }
+});
+
+test('v2 leaderboard, opt-in consent, and first-30 prize notices translate cleanly to English with no Hangul', () => {
+  const {i18n} = loadI18n();
+  i18n.setLang('en');
+  const samples = [
+    '공개 논문을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분(1인 1회)께 부스에서 선물을 드려요.',
+    '심은 결함 중 하나라도 AI가 놓치면 성공이에요. 현장 선물은 먼저 승리한 선착순 30분(1인 1회)께 드려요.',
+    '먼저 승리한 선착순 30분께 부스에서 드려요. 이 화면을 보여 주세요.',
+    '현장 선착순 30명 선물과 별도로, 마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.',
+    '내가 바꾼 문장과 AI 판정을 행사 갤러리에 공개할게요 (선택)',
+    '선택하지 않아도 도전·선물·래더보드 조건은 같아요. 본인 티켓에서 언제든 바꿀 수 있어요.',
+    '래더보드 · 다른 사람 결함 보기',
+    '정복 2편 · 판정 12건 · LIVE 통과율 25%',
+    '기회 2번 포기하고 보기',
+    '지금 열면 남은 도전 기회 2번과 철회 후 재도전 기회를 포함해 새 도전이 종료돼요. 이미 제출해 검증 중인 건과 선물 수령은 그대로 유지돼요.',
+    '도전 기회 3번을 모두 쓰면 다른 사람의 결함을 볼 수 있어요. 지금은 기회 2번이 남아 있어요.',
+    '다른 사람의 결함을 열람하면, 이후 기존 제출을 철회하더라도 새 도전은 할 수 없어요. 이미 제출한 티켓과 선물은 그대로 유지돼요.',
+    '결함 갤러리 열기',
+    '운영진 예시',
+    '아직 공개 선택된 참가자 사례가 없어 운영진 예시를 먼저 보여 드려요. 통계에는 포함되지 않아요.',
+    '논문 출처별 LIVE 통과율',
+    '결함 유형별 LIVE 통과율',
+    '수정 방식별 LIVE 통과율',
+    'LIVE 판정',
+    'FINAL 판정',
+    '내가 도전한 논문',
+    '행사 갤러리에 공개하도록 바꿨어요.',
+    '행사 갤러리에서 비공개로 바꿨어요.',
+  ];
+  for (const ko of samples) {
+    const en = i18n.t(ko);
+    assert.notEqual(en, ko, `missing EN translation: ${ko}`);
+    assert.doesNotMatch(en, /[가-힣]/, `Hangul leaked: ${ko} -> ${en}`);
   }
 });

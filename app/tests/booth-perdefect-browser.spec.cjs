@@ -260,8 +260,8 @@ async function runCase(browser, viewport, desk, lang) {
   });
 
   const ruleExpected = isEn
-    ? 'If the AI misses even one of your defects, you win.'
-    : '심은 결함 중 하나라도 AI가 놓치면 성공이에요.';
+    ? 'If the AI misses even one of your defects, you win. Booth prizes go to the first 30 winners (1 per person).'
+    : '심은 결함 중 하나라도 AI가 놓치면 성공이에요. 현장 선물은 먼저 승리한 선착순 30분(1인 1회)께 드려요.';
   const L = isEn
     ? {caught: 'Found by AI', partial: 'AI got close', missed: 'Missed by AI'}
     : {caught: 'AI가 찾음', partial: '근처를 짚음', missed: 'AI가 놓침'};

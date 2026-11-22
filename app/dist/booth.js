@@ -45,8 +45,50 @@
     invalid:{kind:'void',word:'무효',latin:'VOID'},
     withdrawn:{kind:'void',word:'철회',latin:'WITHDRAWN'}
   };
-  const HERO_COPY='공개 논문을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 부스에서 선물을 드려요.';
-  const RULE_COPY='심은 결함 중 하나라도 AI가 놓치면 성공이에요.';
+  const HERO_COPY='공개 논문을 몰래 고쳐 보세요. AI가 보통 1~3분 안에 찾아내는지 겨뤄요. 심은 결함 중 하나라도 AI가 놓치면 먼저 승리한 선착순 30분(1인 1회)께 부스에서 선물을 드려요.';
+  const RULE_COPY='심은 결함 중 하나라도 AI가 놓치면 성공이에요. 현장 선물은 먼저 승리한 선착순 30분(1인 1회)께 드려요.';
+  const GIFT_SUB_COPY='먼저 승리한 선착순 30분께 부스에서 드려요. 이 화면을 보여 주세요.';
+  const GALLERY_CONSENT_LABEL='내가 바꾼 문장과 AI 판정을 행사 갤러리에 공개할게요 (선택)';
+  const GALLERY_CONSENT_HINT='선택하지 않아도 도전·선물·래더보드 조건은 같아요. 본인 티켓에서 언제든 바꿀 수 있어요.';
+  const ASSIST_LABELS={manual:'직접 수정','my-ai':'내 AI',agent:'에이전트'};
+  const SOURCE_LABELS={mission:'추천 미션',arxiv:'외부 arXiv'};
+  const ROUND_LABELS={live:'LIVE 판정',final:'FINAL 판정'};
+  const STAFF_EXAMPLE_ENTRY=Object.freeze({
+    example:true,
+    paperKey:'2309.15217',
+    paper:Object.freeze({
+      id:'2309.15217v1',
+      title:'Ragas: Automated Evaluation of Retrieval Augmented Generation',
+      source:'mission',
+      license:'cc-by-4.0'
+    }),
+    round:'live',
+    outcome:'missed',
+    assist:'manual',
+    edits:Object.freeze([
+      Object.freeze({
+        index:0,
+        pageIndex:4,
+        defectType:'number',
+        before:'Faithfulness achieves 0.95 agreement with human annotators in Table 1.',
+        after:'Faithfulness achieves 0.50 agreement with human annotators in Table 1.',
+        verdict:'caught',
+        evidence:Object.freeze({
+          quote:'Faithfulness achieves 0.50 agreement with human annotators in Table 1.',
+          rationale:'본문의 결론 서술과 Table 1의 충실도 수치가 서로 맞지 않아요.',
+          rationaleEn:'The modified Table 1 faithfulness figure (0.50) contradicts the surrounding conclusion.'
+        })
+      }),
+      Object.freeze({
+        index:1,
+        pageIndex:5,
+        defectType:'logic',
+        before:'Our framework evaluates RAG pipelines without requiring ground-truth reference answers.',
+        after:'Our framework evaluates RAG pipelines only when gold-standard reference answers are supplied.',
+        verdict:'missed'
+      })
+    ])
+  });
   const EDIT_VERDICTS={
     caught:{text:'AI가 찾음',kind:'caught'},
     partial:{text:'근처를 짚음',kind:'partial'},
@@ -64,7 +106,7 @@
   const PROJECT_QR_CAPTION='휴대폰 카메라로 찍으면 Falsify 프로젝트가 열려요.';
   const PROJECT_QR_ALT='가짜연구소 Falsify 프로젝트 GitHub QR 코드';
   const GENERIC_HINT='숫자, 결론 문장, 표 값 중 한 곳을 골라 티 나지 않게 바꿔 보세요.';
-  const FINAL_COPY='마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.';
+  const FINAL_COPY='현장 선착순 30명 선물과 별도로, 마감 후 더 정밀한 AI가 한 번 더 검증해요. 그때도 못 찾으면 최종 추첨 대상이에요.';
   /* Desktop layout (booth.css, min-width 1024px): the top bar's step indicator and the dock's edit chips. */
   const DESK_QUERY='(min-width:1024px)';
   const DESK_STEP={pick:1,edit:2,send:3,ticket:3};
@@ -118,6 +160,9 @@
     unauthorized:'연결이 잠시 끊겼어요. 「다시 시도」를 누르면 새로 연결해요.',
     invalid_request:'입력 내용을 확인해 주세요.',
     forbidden:'지금 연결로는 이 작업을 할 수 없어요. 「다시 시도」를 누르면 새로 연결해요.',
+    leaderboard_forfeited:'래더보드를 먼저 열어 새 도전이 종료됐어요. 「내 기록」에서 이전 결과를 볼 수 있어요.',
+    leaderboard_locked:'도전 기회를 모두 쓰거나 남은 기회를 포기하면 다른 사람의 결함을 볼 수 있어요.',
+    paper_conquered:'다른 참가자가 이미 정복한 논문이에요. 다른 추천 논문에 도전해 보세요.',
     network:'서버에 연결하지 못했어요. 네트워크를 확인한 뒤 다시 시도해 주세요.',
     offline:'인터넷 연결이 끊겼어요. 연결되면 다시 눌러 주세요.'
   };
@@ -328,7 +373,23 @@
     const body={course:source.course,declared,paper};
     body.consentVersion=consentVersion;
     body.editedSha256=editedSha256;
+    if(typeof source.galleryConsent==='boolean') body.galleryConsent=source.galleryConsent;
     return {ok:true,body};
+  }
+  function featuresOf(data){
+    const raw=data&&data.features&&typeof data.features==='object'?data.features:{};
+    return {gallery:raw.gallery===true,forfeit:raw.forfeit===true,paperBlock:raw.paperBlock===true};
+  }
+  function passRateText(missed, judged){
+    const m=Number(missed);
+    const j=Number(judged);
+    if(!Number.isFinite(m)||!Number.isFinite(j)||j<=0) return '—';
+    return Math.round(Math.max(0,Math.min(1,m/j))*100)+'%';
+  }
+  function defectLabel(id, types){
+    const list=Array.isArray(types)&&types.length?types:DEFECT_TYPES;
+    const hit=list.find(item=>item&&item.id===id);
+    return hit&&hit.label?hit.label:(typeof id==='string'&&id?id:'기타');
   }
   /* The pdf part is always a File named edited.pdf. The visitor's download name stays local. */
   function editedPdfFile(file){
@@ -826,6 +887,15 @@
     let ticket=null;
     let clock=null;
     let unsubEdits=null;
+    let ownerState=null;
+    let lbSummary=null;
+    let lbEntries=[];
+    let lbNextCursor=null;
+    let lbFilter='all';
+    let lbReturnStep='pick';
+    let lbLoading=false;
+    let lbUnlocking=false;
+    let consentSaving=false;
 
     function on(target,type,handler){
       if(!target||typeof target.addEventListener!=='function') return;
@@ -934,6 +1004,30 @@
           el('div',{id:'booth-search-results',className:'booth-search-results'}),
           el('div',{id:'booth-search-pages',className:'booth-row',hidden:true})));
     }
+    function buildLeaderboard(){
+      return el('section',{id:'booth-leaderboard',className:'booth-lb',hidden:true,'aria-label':'래더보드'},
+        el('div',{className:'booth-lb-head'},
+          el('button',{id:'booth-lb-back',type:'button',className:'booth-back',textContent:'← 처음으로'}),
+          el('h2',{className:'booth-headline small'},'오늘의 ',el('b',{textContent:'래더보드'}))),
+        el('p',{id:'booth-lb-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
+        el('section',{id:'booth-lb-summary',className:'booth-lb-summary',hidden:true,'aria-label':'오늘의 집계'}),
+        el('section',{id:'booth-lb-mine',className:'booth-panel booth-lb-mine',hidden:true,'aria-label':'내가 만든 결함'}),
+        el('section',{id:'booth-lb-gate',className:'booth-panel booth-lb-gate',hidden:true,'aria-label':'다른 사람 결함 열람 확인'},
+          el('p',{className:'booth-lab',textContent:'GALLERY ACCESS'}),
+          el('h3',{id:'booth-lb-gate-title',className:'booth-lb-gate-title'}),
+          el('p',{id:'booth-lb-gate-copy',className:'booth-copy'}),
+          el('p',{id:'booth-lb-gate-error',className:'booth-feedback',role:'alert','aria-live':'polite'}),
+          el('div',{className:'booth-row booth-lb-gate-actions'},
+            el('button',{id:'booth-lb-unlock-cancel',type:'button',className:'booth-btn line',textContent:'취소'}),
+            el('button',{id:'booth-lb-unlock-go',type:'button',className:'booth-btn ink',hidden:true,textContent:'결함 갤러리 열기'}))),
+        el('section',{id:'booth-lb-feed',className:'booth-lb-feed',hidden:true,'aria-label':'다른 사람 결함 갤러리'},
+          el('div',{className:'booth-lb-feed-head'},
+            el('p',{className:'booth-klab',textContent:'다른 사람들의 결함'}),
+            el('p',{id:'booth-lb-example-note',className:'booth-small',hidden:true,textContent:'아직 공개 선택된 참가자 사례가 없어 운영진 예시를 먼저 보여 드려요. 통계에는 포함되지 않아요.'})),
+          el('div',{id:'booth-lb-filters',className:'booth-chips',role:'group','aria-label':'결함 필터'}),
+          el('div',{id:'booth-lb-list',className:'booth-lb-list'}),
+          el('button',{id:'booth-lb-more',type:'button',className:'booth-btn line wide',hidden:true,textContent:'더 보기'})));
+    }
     /* Desktop top bar: mark, name, the three-step indicator and 내 기록. Phones keep the per-step bars. */
     function buildDeskBar(){
       const steps=el('ol',{id:'booth-desk-steps',className:'booth-desk-steps','aria-label':'도전 단계'});
@@ -943,6 +1037,7 @@
       return el('header',{id:'booth-deskbar',className:'booth-deskbar booth-desk'},mark(),
         el('span',{className:'booth-nm'},'Falsify',el('small',{textContent:'AI REVIEW CHALLENGE'})),
         steps,
+        el('a',{id:'booth-desk-leaderboard',href:'#booth-leaderboard',className:'booth-desk-rec',hidden:true}),
         el('a',{id:'booth-desk-records',href:'#booth-result',className:'booth-desk-rec',textContent:'내 기록'}));
     }
     function howtoItem(item){
@@ -960,7 +1055,10 @@
             el('h2',{id:'booth-title',className:'booth-headline hero'},'AI를 ',el('b',{textContent:'속일 수'}),el('br'),'있을까요?'),
             el('p',{className:'booth-copy',textContent:HERO_COPY})),
           el('p',{id:'booth-pick-limit',className:'booth-small'}),
-          el('ol',{id:'booth-howto',className:'booth-howto','aria-label':'도전 순서'},...HOWTO.map(howtoItem))),
+          el('ol',{id:'booth-howto',className:'booth-howto','aria-label':'도전 순서'},...HOWTO.map(howtoItem)),
+          el('div',{id:'booth-lb-teaser',className:'booth-lb-teaser',hidden:true},
+            el('p',{id:'booth-lb-teaser-stats',className:'booth-small',hidden:true}),
+            el('button',{id:'booth-pick-leaderboard',type:'button',className:'booth-btn line wide',textContent:'래더보드 · 다른 사람 결함 보기'}))),
         el('div',{className:'booth-landing-list'},
           el('p',{id:'booth-announce',className:'booth-announce',hidden:true}),
           el('p',{id:'booth-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
@@ -971,7 +1069,7 @@
           el('p',{id:'booth-mission-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
           el('p',{id:'booth-mission-credit',className:'booth-small',textContent:MISSION_CREDIT}),
           buildSearch()));
-      return el('div',{id:'booth-step-pick',className:'booth-step'},top,landing,buildRecords());
+      return el('div',{id:'booth-step-pick',className:'booth-step'},top,landing,buildRecords(),buildLeaderboard());
     }
     function buildEdit(){
       return el('div',{id:'booth-step-edit',className:'booth-step',hidden:true},
@@ -1009,6 +1107,11 @@
           el('div',{className:'booth-cut booth-desk','aria-hidden':'true'}),
           el('div',{className:'booth-sec booth-send-confirm'},
             el('p',{id:'booth-send-rule',className:'booth-small booth-rule',textContent:RULE_COPY}),
+            el('div',{id:'booth-gallery-consent-wrap',className:'booth-consent-opt-box',hidden:true},
+              el('label',{for:'booth-gallery-consent',className:'booth-consent-opt'},
+                el('input',{id:'booth-gallery-consent',type:'checkbox'}),
+                el('span',{textContent:GALLERY_CONSENT_LABEL})),
+              el('p',{className:'booth-small',textContent:GALLERY_CONSENT_HINT})),
             el('button',{id:'booth-submit-button',type:'submit',className:'booth-btn ink wide',textContent:'AI에게 제출하기',disabled:true}),
             el('p',{id:'booth-submit-status',className:'booth-feedback',role:'alert','aria-live':'polite'}),
             el('button',{id:'booth-submit-records',type:'button',className:'booth-btn line wide',hidden:true,textContent:'내 기록 보기'}))));
@@ -1080,7 +1183,7 @@
           el('div',{},
             el('p',{className:'booth-klab',textContent:'교환권 · 1인 1회'}),
             el('p',{id:'booth-live-prize',className:'booth-gift-text'}),
-            el('p',{className:'booth-small',textContent:'부스에서 이 화면을 보여 주세요.'})),
+            el('p',{className:'booth-small',textContent:GIFT_SUB_COPY})),
           el('span',{className:'booth-code booth-gift-code','aria-hidden':'true',translate:'no',textContent:'GIFT'})));
     }
     function buildFinal(){
@@ -1120,11 +1223,19 @@
             el('div',{id:'booth-live-note',className:'booth-panel booth-note',hidden:true}),
             el('section',{id:'booth-live-findings',className:'booth-panel booth-findings',hidden:true,'aria-label':'항목별 AI 검증 결과'}),
             el('section',{id:'booth-live-declared',className:'booth-panel booth-declared',hidden:true,'aria-label':'내가 고친 곳'}),
+            el('section',{id:'booth-ticket-consent',className:'booth-panel booth-ticket-consent',hidden:true,'aria-label':'행사 갤러리 공개'},
+              el('p',{className:'booth-klab',textContent:'행사 갤러리 공개'}),
+              el('label',{for:'booth-ticket-consent-input',className:'booth-consent-opt'},
+                el('input',{id:'booth-ticket-consent-input',type:'checkbox'}),
+                el('span',{textContent:GALLERY_CONSENT_LABEL})),
+              el('p',{className:'booth-small',textContent:GALLERY_CONSENT_HINT}),
+              el('p',{id:'booth-ticket-consent-status',className:'booth-feedback',role:'status','aria-live':'polite'})),
             el('p',{id:'booth-live-tip',className:'booth-small',hidden:true,textContent:CAUGHT_TIP}),
             el('p',{id:'booth-live-error',className:'booth-feedback',role:'alert',hidden:true}),
             el('button',{id:'booth-live-recheck',type:'button',className:'booth-btn line wide',hidden:true,textContent:'결과 다시 보기'}),
             el('div',{className:'booth-live-actions'},
               el('button',{id:'booth-live-again',type:'button',className:'booth-btn ink wide',hidden:true,textContent:'다시 도전하기'}),
+              el('button',{id:'booth-live-leaderboard',type:'button',className:'booth-btn line wide',hidden:true,textContent:'래더보드 · 다른 사람 결함 보기'}),
               el('button',{id:'booth-live-records',type:'button',className:'booth-btn line booth-desk',hidden:true,textContent:'내 기록'})),
             el('div',{id:'booth-history',className:'booth-hist',hidden:true,'aria-label':'이 브라우저의 도전 기록'}),
             buildWithdraw())));
@@ -1217,11 +1328,26 @@
       if(spec.pdf) return pdfResult(res);
       return jsonResult(res);
     }
+    function galleryEnabled(){
+      return featuresOf(liveConfig).gallery;
+    }
+    function forfeitEnabled(){
+      return featuresOf(liveConfig).forfeit;
+    }
+    function isGalleryConsentChecked(){
+      const box=byId('booth-gallery-consent');
+      return !!(box&&box.checked===true);
+    }
+    function resetGalleryConsentBox(){
+      const box=byId('booth-gallery-consent');
+      if(box) box.checked=false;
+    }
     function leaveResultHash(){
-      try{if(location.hash==='#booth-result') location.hash='#booth';}catch{}
+      try{if(location.hash==='#booth-result'||location.hash==='#booth-leaderboard') location.hash='#booth';}catch{}
     }
     function showRecords(visible){
       setHidden('booth-result',!visible);
+      if(visible) setHidden('booth-leaderboard',true);
       setHidden('booth-landing',!!visible);
       if(!visible) return;
       prefillClaim();
@@ -1242,6 +1368,393 @@
       leaveResultHash();
       showRecords(false);
       say('booth-result-error','');
+    }
+    function syncHashView(){
+      if(location.hash==='#booth-leaderboard'&&galleryEnabled()){
+        showLeaderboardView(true);
+        return;
+      }
+      if(location.hash==='#booth-result'){
+        showResult(true);
+        return;
+      }
+      if(step==='pick'){
+        setHidden('booth-result',true);
+        setHidden('booth-leaderboard',true);
+        setHidden('booth-landing',false);
+      }
+    }
+    function cleanCountPair(pair){
+      const j=pair&&Number.isSafeInteger(pair.judged)&&pair.judged>=0?pair.judged:0;
+      const m=pair&&Number.isSafeInteger(pair.missed)&&pair.missed>=0?pair.missed:0;
+      return {judged:j,missed:Math.min(m,j)};
+    }
+    function statTile(label, value, sub){
+      return el('div',{className:'booth-lb-kpi'},
+        el('p',{className:'booth-klab',textContent:label}),
+        el('p',{className:'booth-lb-kpi-val',textContent:value}),
+        sub?el('p',{className:'booth-small',textContent:sub}):null);
+    }
+    function rateBarRow(label, pair){
+      const p=cleanCountPair(pair);
+      const pct=p.judged>0?Math.round((p.missed/p.judged)*100):0;
+      const fill=el('i',{className:'booth-lb-bar-fill'});
+      if(fill&&fill.style) fill.style.width=pct+'%';
+      return el('div',{className:'booth-lb-bar-row'},
+        el('div',{className:'booth-lb-bar-head'},
+          el('span',{className:'booth-lb-bar-name',textContent:label}),
+          el('span',{className:'booth-mono-meta',textContent:passRateText(p.missed,p.judged)+' ('+p.missed+'/'+p.judged+')'})),
+        el('div',{className:'booth-lb-bar-track','aria-hidden':'true'},fill));
+    }
+    function rateGroup(title, map, labelFor){
+      if(!map||typeof map!=='object') return null;
+      const entries=Object.entries(map).filter(([,val])=>val&&typeof val==='object'&&Number(val.judged)>0);
+      if(!entries.length) return null;
+      return el('div',{className:'booth-panel booth-lb-group'},
+        el('p',{className:'booth-klab',textContent:title}),
+        ...entries.map(([key,val])=>rateBarRow(labelFor(key),val)));
+    }
+    function conqueredSection(papers){
+      const list=Array.isArray(papers)?papers.filter(item=>item&&typeof item==='object'&&typeof item.paperKey==='string'):[];
+      const items=list.length
+        ? list.map(item=>el('span',{className:'booth-lb-conq-chip',translate:'no'},
+            el('b',{textContent:shortTitle(item.title||item.paperKey)}),
+            el('small',{textContent:'arXiv '+item.paperKey})))
+        : [el('p',{className:'booth-small',textContent:'아직 정복된 논문이 없어요. 첫 정복자가 되어 보세요.'})];
+      return el('div',{className:'booth-panel booth-lb-conq'},
+        el('p',{className:'booth-klab',textContent:'정복된 논문'}),
+        el('div',{className:'booth-lb-conq-list'},...items));
+    }
+    function renderLeaderboardSummary(){
+      const teaser=byId('booth-lb-teaser-stats');
+      const box=byId('booth-lb-summary');
+      if(!lbSummary||typeof lbSummary!=='object'){
+        if(teaser){teaser.textContent='';teaser.hidden=true;}
+        if(box){kidsOf(box);box.hidden=true;}
+        return;
+      }
+      const judged=Number.isSafeInteger(lbSummary.judged)&&lbSummary.judged>=0?lbSummary.judged:0;
+      const missed=Number.isSafeInteger(lbSummary.missed)&&lbSummary.missed>=0?lbSummary.missed:0;
+      const pending=Number.isSafeInteger(lbSummary.pending)&&lbSummary.pending>=0?lbSummary.pending:0;
+      const conquered=Number.isSafeInteger(lbSummary.conqueredCount)&&lbSummary.conqueredCount>=0?lbSummary.conqueredCount:0;
+      if(teaser){
+        teaser.textContent='정복 '+conquered+'편 · 판정 '+judged+'건 · LIVE 통과율 '+passRateText(missed,judged);
+        teaser.hidden=false;
+      }
+      if(!box) return;
+      const types=typesOf(liveConfig);
+      const groups=[
+        rateGroup('논문 출처별 LIVE 통과율',lbSummary.bySource,k=>SOURCE_LABELS[k]||k),
+        rateGroup('결함 유형별 LIVE 통과율',lbSummary.byDefectType,k=>defectLabel(k,types)),
+        rateGroup('수정 방식별 LIVE 통과율',lbSummary.byAssist,k=>ASSIST_LABELS[k]||k)
+      ].filter(Boolean);
+      const kpis=el('div',{className:'booth-lb-kpis'},
+        statTile('LIVE 통과율',passRateText(missed,judged),missed+' / '+judged+'건'),
+        statTile('정복된 논문',conquered+'편',''),
+        statTile('판정 완료',judged+'건',''),
+        statTile('검증 대기',pending+'건',''));
+      kidsOf(box,kpis,groups.length?el('div',{className:'booth-lb-groups'},...groups):null,conqueredSection(lbSummary.conqueredPapers));
+      box.hidden=false;
+    }
+    async function loadLeaderboardSummary(){
+      if(!galleryEnabled()||closed) return;
+      try{
+        const data=await request('/v1/booth/leaderboard/summary',{method:'GET',auth:false});
+        if(closed||!data||typeof data!=='object') return;
+        lbSummary=data;
+        renderLeaderboardSummary();
+      }catch{/* summary is independent and never blocks pick or submit */}
+    }
+    function myReceiptTitles(){
+      const set=new Set();
+      for(const item of readReceipts(storage)){
+        if(item.outcome==='withdrawn') continue;
+        if(item.title) set.add(item.title);
+        if(item.title) set.add(shortTitle(item.title));
+      }
+      return set;
+    }
+    function renderLeaderboardMine(){
+      const box=byId('booth-lb-mine');
+      if(!box) return;
+      const list=readReceipts(storage);
+      if(!list.length){kidsOf(box);box.hidden=true;return;}
+      const cards=list.map(item=>{
+        const stamp=stampFor(item.outcome);
+        const head=el('div',{className:'booth-lb-mine-head'},
+          el('span',{className:'booth-mono-meta',translate:'no',textContent:[item.receipt,shortTitle(item.title)].filter(Boolean).join(' · ')}),
+          el('span',{className:'booth-lb-pill '+(stamp?stamp.kind:'wait'),textContent:stamp?stamp.word:'판정 대기'}));
+        const edits=Array.isArray(item.edits)&&item.edits.length
+          ? item.edits.slice(0,RECEIPT_EDITS_CAP).map((ed,idx)=>el('div',{className:'booth-lb-mine-edit'},
+              el('p',{className:'booth-klab',textContent:editLabel(idx,ed.page,item.edits.length)}),
+              diffNode(ed)))
+          : [];
+        const openBtn=el('button',{type:'button',className:'booth-btn line slim',textContent:'티켓 보기'});
+        openBtn.addEventListener('click',()=>{fillClaim(item);void lookupRecord(item.receipt,item.claimKey);});
+        return el('article',{className:'booth-lb-mine-item'},head,...edits,openBtn);
+      });
+      kidsOf(box,el('p',{className:'booth-klab',textContent:'내가 만든 결함'}),...cards);
+      box.hidden=false;
+    }
+    function ownerStateFrom(data){
+      const raw=data&&data.ownerState&&typeof data.ownerState==='object'?data.ownerState:null;
+      if(!raw) return {used:usedTries(),perOwner:perOwnerCap(),unlocked:false};
+      const perOwner=declaredCap(raw.perOwner!=null?raw.perOwner:(data&&data.limits&&data.limits.perOwner));
+      const used=Number.isSafeInteger(raw.used)&&raw.used>=0?raw.used:usedTries();
+      return {used,perOwner,unlocked:raw.unlocked===true};
+    }
+    function renderLeaderboardGate(){
+      const gate=byId('booth-lb-gate');
+      const go=byId('booth-lb-unlock-go');
+      const cancelBtn=byId('booth-lb-unlock-cancel');
+      if(!gate||!go) return;
+      say('booth-lb-gate-error','');
+      const st=ownerState||{used:usedTries(),perOwner:perOwnerCap(),unlocked:false};
+      const left=chancesLeft(st.perOwner,st.used);
+      if(left>0&&forfeitEnabled()){
+        setText('booth-lb-gate-title','다른 사람의 결함을 지금 볼까요?');
+        setText('booth-lb-gate-copy','지금 열면 남은 도전 기회 '+left+'번과 철회 후 재도전 기회를 포함해 새 도전이 종료돼요. 이미 제출해 검증 중인 건과 선물 수령은 그대로 유지돼요.');
+        go.textContent='기회 '+left+'번 포기하고 보기';
+        go.hidden=false;
+        go.disabled=lbUnlocking;
+        if(cancelBtn) cancelBtn.textContent='취소';
+      }else if(left>0){
+        setText('booth-lb-gate-title','도전을 마친 뒤 열 수 있어요');
+        setText('booth-lb-gate-copy','도전 기회 '+st.perOwner+'번을 모두 쓰면 다른 사람의 결함을 볼 수 있어요. 지금은 기회 '+left+'번이 남아 있어요.');
+        go.hidden=true;
+        if(cancelBtn) cancelBtn.textContent='돌아가기';
+      }else{
+        setText('booth-lb-gate-title','도전 기회를 모두 썼어요');
+        setText('booth-lb-gate-copy','다른 사람의 결함을 열람하면, 이후 기존 제출을 철회하더라도 새 도전은 할 수 없어요. 이미 제출한 티켓과 선물은 그대로 유지돼요.');
+        go.textContent='결함 갤러리 열기';
+        go.hidden=false;
+        go.disabled=lbUnlocking;
+        if(cancelBtn) cancelBtn.textContent='취소';
+      }
+      gate.hidden=false;
+      setHidden('booth-lb-feed',true);
+    }
+    function entryMatchesMine(entry, titles){
+      if(!titles.size||!entry||!entry.paper) return false;
+      const t=sanitizePaperTitle(entry.paper.title||'');
+      return !!(t&&(titles.has(t)||titles.has(shortTitle(t))));
+    }
+    function galleryEditNode(edit, idx, total, types){
+      const page=Number.isSafeInteger(edit.pageIndex)&&edit.pageIndex>=0?edit.pageIndex+1:null;
+      const label=editLabel(Number.isSafeInteger(edit.index)?edit.index:idx,page,total);
+      const dtype=edit.defectType?el('span',{className:'booth-lb-dtype',textContent:defectLabel(edit.defectType,types)}):null;
+      const verdict=typeof edit.verdict==='string'?edit.verdict:'';
+      const badge=verdictBadge(verdict);
+      const head=el('div',{className:'booth-declared-head'},
+        el('span',{className:'booth-lb-edit-meta'},el('span',{className:'booth-klab',textContent:label}),dtype),
+        badge);
+      const ev=cleanEvidence(edit.evidence,verdict);
+      const evNode=ev?evidenceBlock({verdict,evidence:ev}):null;
+      return el('div',{className:'booth-declared-item'},head,diffNode({before:edit.before||'',after:edit.after||''}),evNode);
+    }
+    function galleryPaperCredit(entry){
+      const p=entry&&entry.paper&&typeof entry.paper==='object'?entry.paper:{};
+      const id=typeof p.id==='string'&&p.id?p.id:(typeof entry.paperKey==='string'?entry.paperKey:'');
+      const url=arxivUrl(id);
+      const lic=licenseId(p);
+      const label=licenseLabel(lic);
+      const lUrl=licenseUrl(lic);
+      const parts=[];
+      if(url) parts.push(extLink(url,'arXiv '+id));
+      else if(id) parts.push(el('span',{translate:'no',textContent:'arXiv '+id}));
+      if(label) parts.push(' · ',lUrl?extLink(lUrl,label):label);
+      return parts.length?el('p',{className:'booth-credit',translate:'no'},...parts):null;
+    }
+    function galleryCard(entry, types, isMine){
+      const p=entry&&entry.paper&&typeof entry.paper==='object'?entry.paper:{};
+      const title=sanitizePaperTitle(p.title||'')||p.id||entry.paperKey||'';
+      const stamp=stampFor(entry.outcome);
+      const roundText=entry.round==='final'?ROUND_LABELS.final:ROUND_LABELS.live;
+      const assistText=ASSIST_LABELS[entry.assist]||'';
+      const badges=el('div',{className:'booth-lb-badges'},
+        entry.example===true?el('span',{className:'booth-lb-pill example',textContent:'운영진 예시'}):null,
+        isMine?el('span',{className:'booth-lb-pill mine',textContent:'내가 도전한 논문'}):null,
+        stamp?el('span',{className:'booth-lb-pill '+stamp.kind,textContent:stamp.word}):null,
+        el('span',{className:'booth-lb-pill round',textContent:roundText}),
+        assistText?el('span',{className:'booth-lb-pill assist',textContent:assistText}):null);
+      const edits=(Array.isArray(entry.edits)?entry.edits:[]).slice(0,5);
+      return el('article',{className:'booth-panel booth-lb-card'+(entry.example===true?' is-example':'')},
+        badges,
+        title?el('h3',{className:'booth-lb-card-title',translate:'no',textContent:title}):null,
+        galleryPaperCredit(entry),
+        ...edits.map((edit,idx)=>galleryEditNode(edit,idx,edits.length,types)));
+    }
+    function renderLeaderboardFeed(){
+      const feed=byId('booth-lb-feed');
+      const filters=byId('booth-lb-filters');
+      const listBox=byId('booth-lb-list');
+      const more=byId('booth-lb-more');
+      if(!feed||!listBox) return;
+      const isExample=!lbEntries.length;
+      const source=isExample?[STAFF_EXAMPLE_ENTRY]:lbEntries;
+      setHidden('booth-lb-example-note',!isExample);
+      const titles=myReceiptTitles();
+      const hasMine=!isExample&&source.some(entry=>entryMatchesMine(entry,titles));
+      if(lbFilter==='mine'&&!hasMine) lbFilter='all';
+      if(filters){
+        const defs=[['all','전체'],['missed','통과'],['caught','적발']];
+        if(hasMine) defs.push(['mine','내가 도전한 논문']);
+        kidsOf(filters,...defs.map(([id,label])=>{
+          const btn=el('button',{type:'button',className:lbFilter===id?'booth-chip on':'booth-chip',textContent:label,'aria-pressed':String(lbFilter===id)});
+          btn.addEventListener('click',()=>{lbFilter=id;renderLeaderboardFeed();});
+          return btn;
+        }));
+      }
+      const filtered=source.filter(entry=>{
+        if(lbFilter==='missed') return entry.outcome==='missed';
+        if(lbFilter==='caught') return entry.outcome==='caught'||entry.outcome==='partial';
+        if(lbFilter==='mine') return entryMatchesMine(entry,titles);
+        return true;
+      });
+      const types=typesOf(liveConfig);
+      if(filtered.length){
+        kidsOf(listBox,...filtered.map(entry=>galleryCard(entry,types,!isExample&&entryMatchesMine(entry,titles))));
+      }else{
+        kidsOf(listBox,el('p',{className:'booth-small',textContent:'조건에 맞는 공개 결함이 아직 없어요.'}));
+      }
+      if(more) more.hidden=isExample||!lbNextCursor||lbLoading;
+      feed.hidden=false;
+      setHidden('booth-lb-gate',true);
+    }
+    async function loadLeaderboardFeed(append){
+      if(lbLoading||closed) return;
+      lbLoading=true;
+      const more=byId('booth-lb-more');
+      if(more) more.disabled=true;
+      if(!append) say('booth-lb-status','결함 갤러리를 불러오는 중…');
+      try{
+        const query=append&&lbNextCursor?'?cursor='+encodeURIComponent(lbNextCursor):'';
+        const data=await requestFresh('/v1/booth/leaderboard'+query,{method:'GET',auth:true});
+        if(closed) return;
+        const incoming=data&&Array.isArray(data.entries)?data.entries:[];
+        lbEntries=append?lbEntries.concat(incoming):incoming;
+        lbNextCursor=data&&typeof data.nextCursor==='string'&&data.nextCursor?data.nextCursor:null;
+        lbLoading=false;
+        say('booth-lb-status','');
+        renderLeaderboardFeed();
+      }catch(error){
+        if(closed) return;
+        if(error&&error.code==='leaderboard_locked'){
+          ownerState=Object.assign({},ownerState||{used:usedTries(),perOwner:perOwnerCap()},{unlocked:false});
+          say('booth-lb-status','');
+          renderLeaderboardGate();
+          say('booth-lb-gate-error',errorMessage('leaderboard_locked'));
+          return;
+        }
+        say('booth-lb-status',errorMessage(error&&error.code,error));
+        offerRetry('booth-lb-status',error,()=>loadLeaderboardFeed(append));
+      }finally{
+        lbLoading=false;
+        if(more) more.disabled=false;
+      }
+    }
+    async function unlockLeaderboard(){
+      if(lbUnlocking||closed) return;
+      lbUnlocking=true;
+      const go=byId('booth-lb-unlock-go');
+      if(go) go.disabled=true;
+      say('booth-lb-gate-error','');
+      try{
+        const data=await requestFresh('/v1/booth/leaderboard/unlock',{method:'POST',auth:true,body:{}});
+        if(closed) return;
+        if(data&&data.unlocked===true){
+          ownerState=Object.assign({},ownerState||{used:usedTries(),perOwner:perOwnerCap()},{unlocked:true});
+          renderChances();
+          renderSendTicket();
+          await loadLeaderboardFeed(false);
+        }
+      }catch(error){
+        if(closed) return;
+        say('booth-lb-gate-error',errorMessage(error&&error.code,error));
+        offerRetry('booth-lb-gate-error',error,unlockLeaderboard);
+      }finally{
+        lbUnlocking=false;
+        if(go) go.disabled=false;
+      }
+    }
+    /* Explicit user journey only: checks ownerState with visitor bearer without delaying initial pick boot. */
+    async function refreshLeaderboardState(){
+      say('booth-lb-status','래더보드 상태를 확인하는 중…');
+      setHidden('booth-lb-gate',true);
+      setHidden('booth-lb-feed',true);
+      void loadLeaderboardSummary();
+      try{
+        const data=await requestFresh('/v1/booth/config',{method:'GET',auth:true});
+        if(closed) return;
+        if(data&&typeof data==='object'){
+          if(data.features) liveConfig=Object.assign({},liveConfig,data);
+          ownerState=ownerStateFrom(data);
+          renderChances();
+        }
+        say('booth-lb-status','');
+        if(ownerState&&ownerState.unlocked) await loadLeaderboardFeed(false);
+        else renderLeaderboardGate();
+      }catch(error){
+        if(closed) return;
+        say('booth-lb-status',errorMessage(error&&error.code,error));
+        offerRetry('booth-lb-status',error,refreshLeaderboardState);
+      }
+    }
+    function showLeaderboardView(visible){
+      if(visible&&!galleryEnabled()) return;
+      if(visible&&step!=='pick') setStep('pick');
+      setHidden('booth-leaderboard',!visible);
+      if(!visible) return;
+      setHidden('booth-landing',true);
+      setHidden('booth-result',true);
+      renderLeaderboardSummary();
+      renderLeaderboardMine();
+      void refreshLeaderboardState();
+    }
+    function openLeaderboard(event){
+      if(event&&typeof event.preventDefault==='function') event.preventDefault();
+      if(!galleryEnabled()) return;
+      lbReturnStep=step==='ticket'&&ticket?'ticket':'pick';
+      try{location.hash='#booth-leaderboard';}catch{}
+      showLeaderboardView(true);
+    }
+    function closeLeaderboard(){
+      leaveResultHash();
+      setHidden('booth-leaderboard',true);
+      say('booth-lb-status','');
+      say('booth-lb-gate-error','');
+      if(lbReturnStep==='ticket'&&ticket){
+        lbReturnStep='pick';
+        setStep('ticket');
+        return;
+      }
+      setHidden('booth-result',true);
+      setHidden('booth-landing',false);
+    }
+    async function saveTicketConsent(){
+      const input=byId('booth-ticket-consent-input');
+      if(!input||!ticket||!ticket.receipt||!ticket.claimKey||consentSaving) return;
+      const nextVal=input.checked===true;
+      consentSaving=true;
+      input.disabled=true;
+      say('booth-ticket-consent-status','저장하는 중…');
+      try{
+        const data=await request('/v1/booth/gallery-consent',{
+          method:'POST',auth:false,
+          body:{receipt:ticket.receipt,claimKey:ticket.claimKey,galleryConsent:nextVal}
+        });
+        if(closed) return;
+        const confirmed=data&&typeof data.galleryConsent==='boolean'?data.galleryConsent:nextVal;
+        input.checked=confirmed;
+        say('booth-ticket-consent-status',confirmed?'행사 갤러리에 공개하도록 바꿨어요.':'행사 갤러리에서 비공개로 바꿨어요.');
+      }catch(error){
+        if(closed) return;
+        input.checked=!nextVal;
+        say('booth-ticket-consent-status',errorMessage(error&&error.code,error));
+      }finally{
+        consentSaving=false;
+        input.disabled=false;
+      }
     }
     function prefillClaim(){
       const latest=readReceipts(storage)[0];
@@ -1663,6 +2176,7 @@
       paper=null;
       boothFile=null;
       clearGenerated();
+      resetGalleryConsentBox();
       const store=boothEdits();
       if(store&&typeof store.clear==='function') store.clear();
       renderCredit();
@@ -2137,7 +2651,7 @@
     }
     /* The course choice is hidden at the booth: every submission is the quick course. */
     function submissionInput(paperPayload){
-      return {
+      const input={
         course,
         consentVersion:liveConsentVersion(),
         rows:rows.map(rowPayload),
@@ -2146,6 +2660,8 @@
         limits:liveConfig&&liveConfig.limits,
         defectTypes:typesOf(liveConfig).map(item=>item.id)
       };
+      if(galleryEnabled()) input.galleryConsent=isGalleryConsentChecked();
+      return input;
     }
     function declaredToReceiptEdits(list){
       if(!Array.isArray(list)) return [];
@@ -2241,15 +2757,22 @@
       if(button) button.disabled=true;
       say('booth-submit-status','제출하는 중…');
       try{
+        const consented=galleryEnabled()&&isGalleryConsentChecked();
         const data=await requestFresh('/v1/booth/submissions',{method:'POST',auth:true,form:payload.form});
         const meta=ticketMeta(data,typeof data.claimKey==='string'?data.claimKey:'',payload.declared);
         rememberClaim(meta);
+        if(ownerState) ownerState.used+=1;
+        resetGalleryConsentBox();
         say('booth-submit-status','');
-        followSubmission(data,meta);
+        followSubmission(Object.assign({},data,galleryEnabled()?{galleryConsent:consented}:{}),meta);
       }catch(error){
         if(error.code==='consent_outdated'&&!again&&await refreshConsentVersion()){submitBooth(null,true);return;}
+        if(error.code==='leaderboard_forfeited'){
+          ownerState=Object.assign({},ownerState||{used:usedTries(),perOwner:perOwnerCap()},{unlocked:true});
+          renderChances();
+        }
         say('booth-submit-status',submitFailureText(error));
-        setHidden('booth-submit-records',!capHit(error));
+        setHidden('booth-submit-records',!(capHit(error)||error.code==='leaderboard_forfeited'));
         offerRetry('booth-submit-status',error,()=>submitBooth());
         showKnownReceipt(error);
         refreshSubmitButton();
@@ -2311,6 +2834,7 @@
       stopPolling();
       try{
         const data=await request('/v1/booth/withdraw',{method:'POST',auth:false,body});
+        if(ownerState&&ownerState.used>0) ownerState.used-=1;
         withdrawAsk(false);
         applyClaim(data);
       }catch(error){
@@ -2337,7 +2861,9 @@
       return readReceipts(storage).filter(item=>item.outcome!=='withdrawn').length;
     }
     function chances(){
-      return chancesLeft(perOwnerCap(),usedTries());
+      if(ownerState&&ownerState.unlocked===true) return 0;
+      const used=ownerState&&Number.isSafeInteger(ownerState.used)?Math.max(ownerState.used,usedTries()):usedTries();
+      return chancesLeft(perOwnerCap(),used);
     }
     function capHit(error){
       return error.code==='rate_limited'&&!(error.retryAfter>0);
@@ -2366,6 +2892,10 @@
       const box=byId('booth-withdraw-box');
       if(box) box.open=false;
       say('booth-copy-status','');
+      say('booth-ticket-consent-status','');
+      const consentInput=byId('booth-ticket-consent-input');
+      if(consentInput) consentInput.checked=false;
+      setHidden('booth-leaderboard',true);
       leaveResultHash();
       setStep('ticket');
     }
@@ -2629,7 +3159,14 @@
       renderNote(view);
       const attached=renderDeclared(view,data);
       renderFindings(view,attached);
+      const showConsent=galleryEnabled()&&view.state!=='withdrawn'&&!!(ticket&&ticket.receipt&&ticket.claimKey);
+      setHidden('booth-ticket-consent',!showConsent);
+      if(showConsent&&!consentSaving){
+        const box=byId('booth-ticket-consent-input');
+        if(box) box.checked=data.galleryConsent===true;
+      }
       setHidden('booth-live-again',!view.final);
+      setHidden('booth-live-leaderboard',!(view.final&&galleryEnabled()));
       setHidden('booth-live-records',!view.final);
       setHidden('booth-final',view.state!=='missed');
       setHidden('booth-withdraw-box',view.state==='withdrawn');
@@ -2723,7 +3260,7 @@
       if(!meta.receipt||!meta.claimKey) return;
       fillClaim(meta);
       openTicket(meta);
-      applyClaim({receipt:meta.receipt,status:data.status||'received',published:false,createdAt:meta.createdAt,declaredCount:data.declaredCount});
+      applyClaim({receipt:meta.receipt,status:data.status||'received',published:false,createdAt:meta.createdAt,declaredCount:data.declaredCount,galleryConsent:data.galleryConsent===true});
       beginPolling(meta.receipt,meta.claimKey,false);
     }
     /* Receipt, short paper title and the stamp word once a result is known. */
@@ -2756,6 +3293,7 @@
     /* A reload within 15 min of the newest receipt, or a #booth-result visit, picks the ticket up again.
        A receipt that already has its result gives way to saved progress, so 「이어서」 can show on pick. */
     function resumeLatest(){
+      if(location.hash==='#booth-leaderboard'&&galleryEnabled()) return;
       const latest=readReceipts(storage)[0];
       if(!latest) return;
       const created=Date.parse(latest.createdAt);
@@ -2779,10 +3317,11 @@
       waiting=false;
       leaveResultHash();
       showRecords(false);
+      setHidden('booth-leaderboard',true);
       resetWorkspace();
       clearPaper();
       hint='';
-      for(const id of ['booth-submit-status','booth-search-status','booth-mission-status','booth-dock-status','booth-copy-status']) say(id,'');
+      for(const id of ['booth-submit-status','booth-search-status','booth-mission-status','booth-dock-status','booth-copy-status','booth-ticket-consent-status','booth-lb-status','booth-lb-gate-error']) say(id,'');
       liveError('');
       setHidden('booth-submit-records',true);
       setStep('pick');
@@ -2870,6 +3409,15 @@
       rememberPdfLimit(data);
       host.hidden=false;
       setHidden('booth-search',false);
+      const hasGallery=galleryEnabled();
+      setText('booth-desk-leaderboard',hasGallery?'래더보드':'');
+      setHidden('booth-desk-leaderboard',!hasGallery);
+      setHidden('booth-lb-teaser',!hasGallery);
+      setHidden('booth-gallery-consent-wrap',!hasGallery);
+      if(!hasGallery){
+        resetGalleryConsentBox();
+        setHidden('booth-leaderboard',true);
+      }
       const announcement=typeof data.announcement==='string'?data.announcement.trim():'';
       setText('booth-announce',announcement);
       setHidden('booth-announce',!announcement);
@@ -2879,7 +3427,8 @@
       prefillClaim();
       renderReceipts();
       renderChances();
-      showResult(false);
+      if(hasGallery) void loadLeaderboardSummary();
+      syncHashView();
       resumeLatest();
     }
     async function loadConfig(){
@@ -2911,6 +3460,14 @@
     on(byId('booth-edit-back'),'click',backToPick);
     on(byId('booth-dock-back'),'click',backToPick);
     on(byId('booth-dock'),'keydown',event=>{if(event&&event.key==='Escape'&&dockPopOpen){dockPopOpen=false;renderDock();}});
+    on(byId('booth-desk-leaderboard'),'click',openLeaderboard);
+    on(byId('booth-pick-leaderboard'),'click',openLeaderboard);
+    on(byId('booth-live-leaderboard'),'click',openLeaderboard);
+    on(byId('booth-lb-back'),'click',closeLeaderboard);
+    on(byId('booth-lb-unlock-cancel'),'click',closeLeaderboard);
+    on(byId('booth-lb-unlock-go'),'click',()=>{void unlockLeaderboard();});
+    on(byId('booth-lb-more'),'click',()=>{void loadLeaderboardFeed(true);});
+    on(byId('booth-ticket-consent-input'),'change',()=>{void saveTicketConsent();});
     on(byId('booth-desk-records'),'click',openResult);
     on(byId('booth-live-records'),'click',openResult);
     on(deskQuery,'change',applyDesk);
@@ -2929,7 +3486,7 @@
     on(doc,'falsify:document',onBoothDocument);
     on(doc,'falsify:document-clear',onBoothClear);
     on(doc,'falsify:paper-workspace-pdf-error',onLatePdfError);
-    on(root,'hashchange',()=>{showResult(false);});
+    on(root,'hashchange',()=>{syncHashView();});
     on(root,'resize',()=>{if(step==='ticket') drawBarcode();});
     on(doc,'visibilitychange',onReturn);
     on(root,'pageshow',event=>{if(!event||event.persisted!==false) onReturn();});
@@ -2976,7 +3533,7 @@
     readReceipts,rememberReceipt,recentReceipts,receiptRecord,paperSearchPath,paperPdfPath,
     nextPollDelay,retryAfterMs,resultView,capMessage,
     parsePublicNote,diffParts,ENGINE_UNAVAILABLE,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,licenseUrl,arxivUrl,shortTitle,
-    queueLabel,
+    queueLabel,featuresOf,passRateText,defectLabel,STAFF_EXAMPLE_ENTRY,
     NO_REASON,RECEIPT_KEY,RECEIPT_CAP,RECENT_CAP,mount
   };
 })(typeof window==='object'?window:globalThis);
