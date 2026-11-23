@@ -410,19 +410,19 @@ function mergeRuns(state, payload, contributor) {
     const rev = effectiveRevision(incoming.revisionSha256, payload.sourceSha256);
     const key = runStorageKey(contributor.key, rev, incoming.id);
     const prev = byKey.get(key);
-    const detector = incoming.detector || prev?.detector || '';
-    const condition = incoming.condition || prev?.condition || '';
     const next = {
+      ...prev,
       key,
       id: incoming.id,
       contributor: contributor.key,
       revisionSha256: rev,
       model: incoming.model || prev?.model || '',
-      ...(detector ? { detector } : {}),
-      ...(condition ? { condition } : {}),
-      ...(incoming.createdAt || prev?.createdAt ? { createdAt: prev?.createdAt || incoming.createdAt } : {}),
       findings: mergeFindings(prev?.findings || [], incoming.findings),
     };
+    for (const field of ['detector', 'condition']) {
+      if (incoming[field]) next[field] = incoming[field];
+    }
+    if (incoming.createdAt && !next.createdAt) next.createdAt = incoming.createdAt;
     byKey.set(key, next);
   }
   state.runs = [...byKey.values()].sort((a, b) => a.key.localeCompare(b.key));

@@ -789,30 +789,26 @@ async function loadVerifiedJsonAttachment(fetchImpl, base, session, pageId, atta
   return JSON.parse(strictDecoder.decode(bytes));
 }
 
+function committedPaperState(page, property) {
+  if (!HEX64.test(property.sourceSha256 || '')) return null;
+  const parsed = parseAppOwnedPaperBody(page.body?.storage?.value, property.sourceSha256);
+  if (parsed) return parsed.stateToken === 'pending' ? null : parsed.stateToken;
+  return property.stateSha256;
+}
+
 async function loadStructuredRunsForPage(fetchImpl, base, session, page, pageId, attachments) {
-  const paperProp = pagePropertyByKey(page, 'falsify-w8-paper-sync');
-  if (paperProp && paperProp.ready === true && HEX64.test(String(paperProp.sourceSha256 || ''))) {
-    const parsedBody = parseAppOwnedPaperBody(page?.body?.storage?.value, paperProp.sourceSha256);
-    const stateSha = parsedBody && parsedBody.stateToken !== 'pending'
-      ? parsedBody.stateToken
-      : (HEX64.test(String(paperProp.stateSha256 || '')) ? paperProp.stateSha256 : null);
-    if (!stateSha) return { isStructured: true, runs: [] };
-    const state = await loadVerifiedJsonAttachment(fetchImpl, base, session, pageId, attachments, stateSha);
-    if (state && state.schema === W8_PAPER_SYNC_SCHEMA && state.sourceSha256 === paperProp.sourceSha256 && Array.isArray(state.runs)) {
-      return { isStructured: true, runs: state.runs };
-    }
-    return { isStructured: true, runs: [] };
+  const paper = pagePropertyByKey(page, 'falsify-w8-paper-sync');
+  const archive = pagePropertyByKey(page, 'falsify-w8-archive');
+  const load = sha => HEX64.test(sha || '') ? loadVerifiedJsonAttachment(fetchImpl, base, session, pageId, attachments, sha) : null;
+  if (paper?.ready === true) {
+    const state = await load(committedPaperState(page, paper));
+    const verified = state?.schema === W8_PAPER_SYNC_SCHEMA && state.sourceSha256 === paper.sourceSha256;
+    return { isStructured: true, runs: verified && Array.isArray(state.runs) ? state.runs : [] };
   }
-
-  const w8Prop = pagePropertyByKey(page, 'falsify-w8-archive');
-  if (w8Prop && w8Prop.ready === true && HEX64.test(String(w8Prop.archiveSha256 || ''))) {
-    const archive = await loadVerifiedJsonAttachment(fetchImpl, base, session, pageId, attachments, w8Prop.archiveSha256);
-    if (archive && archive.schema === W8_ARCHIVE_SCHEMA && Array.isArray(archive.runs)) {
-      return { isStructured: true, runs: normalizeArchiveRuns(archive) };
-    }
-    return { isStructured: true, runs: [] };
+  if (archive?.ready === true) {
+    const state = await load(archive.archiveSha256);
+    return { isStructured: true, runs: state?.schema === W8_ARCHIVE_SCHEMA ? normalizeArchiveRuns(state) : [] };
   }
-
   return { isStructured: false, runs: [] };
 }
 

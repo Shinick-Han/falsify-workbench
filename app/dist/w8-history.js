@@ -742,6 +742,16 @@
     return box;
   }
 
+  function buildMissEvidence(doc, evidence) {
+    const p = doc.createElement('p');
+    p.className = 'booth-small w8-history-miss-evidence';
+    const header = [evidence.runId, evidence.condition && '조건 ' + evidence.condition,
+      evidence.detector, evidence.model, evidence.page && evidence.page + '쪽', evidence.locationLabel]
+      .filter(Boolean).join(' · ');
+    p.textContent = [header, evidence.quote, evidence.rationale].filter(Boolean).join(' · ');
+    return p;
+  }
+
   function buildRepeatedMissNode(doc, miss) {
     const li = doc.createElement('li');
     li.className = 'w8-history-att w8-history-miss';
@@ -764,21 +774,7 @@
     meta.textContent = metaParts.join(' · ');
     li.append(meta);
 
-    for (const ev of miss.evidence) {
-      const p = doc.createElement('p');
-      p.className = 'booth-small w8-history-miss-evidence';
-      const evParts = [];
-      if (ev.runId) evParts.push(ev.runId);
-      if (ev.condition) evParts.push('조건 ' + ev.condition);
-      if (ev.detector) evParts.push(ev.detector);
-      if (ev.model) evParts.push(ev.model);
-      if (ev.page !== null) evParts.push(ev.page + '쪽');
-      if (ev.locationLabel) evParts.push(ev.locationLabel);
-      const header = evParts.join(' · ');
-      const body = [ev.quote ? '"' + ev.quote + '"' : '', ev.rationale].filter(Boolean).join(' — ');
-      p.textContent = header && body ? header + ': ' + body : (body || header);
-      li.append(p);
-    }
+    for (const ev of miss.evidence) li.append(buildMissEvidence(doc, ev));
     return li;
   }
 
@@ -914,25 +910,6 @@
     const knownIssues = handlers.jiraIssues.filter(it => FLS_ISSUE_RE.test(it.id));
     const currentIssue = src.jiraLinkIssueKey || knownIssues[0]?.id || 'FLS-18';
 
-    if (knownIssues.length) {
-      const issueSelect = doc.createElement('select');
-      issueSelect.className = 'w8-history-jira-issue-select';
-      issueSelect.setAttribute('aria-label', '기존 FLS 이슈 선택');
-      for (const issue of knownIssues) {
-        const opt = doc.createElement('option');
-        opt.value = issue.id;
-        opt.textContent = issue.id + ' · ' + issue.title;
-        if (issue.id === currentIssue) opt.selected = true;
-        issueSelect.append(opt);
-      }
-      issueSelect.value = knownIssues.some(it => it.id === currentIssue) ? currentIssue : knownIssues[0].id;
-      issueSelect.addEventListener('change', () => {
-        issueInput.value = issueSelect.value;
-        handlers.onChangeJiraIssue(issueSelect.value);
-      });
-      controls.append(issueSelect);
-    }
-
     const issueInput = doc.createElement('input');
     issueInput.type = 'text';
     issueInput.className = 'w8-history-jira-issue-input';
@@ -940,8 +917,16 @@
     issueInput.placeholder = '예: FLS-18';
     issueInput.setAttribute('aria-label', '기존 FLS 이슈 키');
     issueInput.addEventListener('input', () => handlers.onChangeJiraIssue(issueInput.value));
-    issueInput.addEventListener('change', () => handlers.onChangeJiraIssue(issueInput.value));
-    controls.append(issueInput);
+    issueInput.setAttribute('list', 'w8-history-issue-options');
+    const suggestions = doc.createElement('datalist');
+    suggestions.id = 'w8-history-issue-options';
+    for (const issue of knownIssues) {
+      const option = doc.createElement('option');
+      option.value = issue.id;
+      option.label = issue.title;
+      suggestions.append(option);
+    }
+    controls.append(issueInput, suggestions);
 
     const sendBtn = doc.createElement('button');
     sendBtn.type = 'button';
@@ -1565,69 +1550,63 @@
       return res.issueKey + ' 댓글에 Confluence 링크를 기록했어요.';
     }
 
+    function showJiraLinkError(src, message) {
+      src.jiraLinkError = message;
+      src.jiraLinkStatus = '';
+      paint();
+      return null;
+    }
+
+    function applyJiraLinkResult(src, result) {
+      src.jiraLinkNeedsScope = false;
+      src.jiraLinkResult = { ...result, issueUrl: allowedSiteUrl(result.issueUrl) };
+      src.jiraLinkStatus = jiraLinkSuccessCopy(result);
+      paint();
+      return result;
+    }
+
     async function sendJiraLink(source, itemId, { issueKey, pattern } = {}) {
-      if (st.destroyed || source !== 'confluence' || !itemId) return null;
+      if (st.destroyed || source !== 'confluence') return null;
       if (!isConnected()) { clear({ authExpired: true }); return null; }
       const src = st.sources.confluence;
       if (!src.detail || src.detail.id !== itemId || src.jiraLinkSending) return null;
-      const cleanIssue = cleanText(String(issueKey || src.jiraLinkIssueKey || ''), 32).toUpperCase();
+      const cleanIssue = cleanText(issueKey || src.jiraLinkIssueKey, 32).toUpperCase();
       src.jiraLinkIssueKey = cleanIssue;
-      if (!FLS_ISSUE_RE.test(cleanIssue)) {
-        src.jiraLinkError = '기존 FLS 이슈 키(예: FLS-18)를 입력해 주세요.';
-        src.jiraLinkStatus = '';
-        paint();
-        return null;
-      }
+      if (!FLS_ISSUE_RE.test(cleanIssue)) return showJiraLinkError(src, '기존 FLS 이슈 키(예: FLS-18)를 입력해 주세요.');
       const syncBase = currentSyncBase();
-      if (!syncBase || typeof d.team?.historyJiraLink !== 'function') {
-        src.jiraLinkError = ERROR_COPY.not_configured;
-        src.jiraLinkStatus = '';
-        paint();
-        return null;
-      }
+      if (!syncBase) return showJiraLinkError(src, ERROR_COPY.not_configured);
       const chosen = pattern || buildPatternChoices(src.detail)[0];
+      return saveJiraLink(src, chosen, itemId, cleanIssue, syncBase);
+    }
+
+    async function saveJiraLink(src, chosen, itemId, issueKey, syncBase) {
       src.jiraLinkPatternKey = chosen.key;
       const sGen = st.sessionGen;
       const dGen = src.detailGen;
       const jGen = ++src.jiraLinkGen;
+      const stale = () => isStaleDetail('confluence', itemId, sGen, dGen) || jGen !== src.jiraLinkGen;
       src.jiraLinkSending = true;
       src.jiraLinkError = '';
       src.jiraLinkStatus = '';
       paint();
       try {
         if (src.jiraLinkNeedsScope) await d.team.connect({ base: syncBase });
-        const res = await d.team.historyJiraLink({
-          issueKey: cleanIssue,
-          pageId: itemId,
-          patternKey: chosen.key,
-          patternLabel: chosen.label,
-          summary: chosen.summary,
-          ...(chosen.revisionSha256 ? { revisionSha256: chosen.revisionSha256 } : {}),
+        if (stale()) return null;
+        const result = await d.team.historyJiraLink({
+          issueKey, pageId: itemId, patternKey: chosen.key, patternLabel: chosen.label,
+          summary: chosen.summary, revisionSha256: chosen.revisionSha256,
         }, { base: syncBase });
-        if (isStaleDetail('confluence', itemId, sGen, dGen) || jGen !== src.jiraLinkGen) return null;
+        if (stale()) return null;
         src.jiraLinkSending = false;
-        src.jiraLinkNeedsScope = false;
-        src.jiraLinkResult = {
-          issueKey: cleanText(res?.issueKey || cleanIssue, 32),
-          issueUrl: allowedSiteUrl(res?.issueUrl),
-          commentId: cleanText(String(res?.commentId ?? ''), 64),
-          reused: res?.reused === true,
-          updated: res?.updated === true,
-          alreadyExisted: res?.alreadyExisted === true,
-        };
-        src.jiraLinkStatus = jiraLinkSuccessCopy(src.jiraLinkResult);
-        paint();
-        return src.jiraLinkResult;
+        return applyJiraLinkResult(src, result);
       } catch (err) {
-        if (st.destroyed || sGen !== st.sessionGen || dGen !== src.detailGen || jGen !== src.jiraLinkGen) return null;
+        if (stale()) return null;
         src.jiraLinkSending = false;
         if (isAuthFailure(err)) { clear({ authExpired: true }); return null; }
         src.jiraLinkNeedsScope = isJiraScopeError(err);
-        src.jiraLinkError = src.jiraLinkNeedsScope
+        return showJiraLinkError(src, src.jiraLinkNeedsScope
           ? '댓글을 기록하려면 Jira 쓰기 권한을 연결해 주세요.'
-          : historyErrorMessage(err, 'jira');
-        paint();
-        return null;
+          : historyErrorMessage(err, 'jira'));
       }
     }
 

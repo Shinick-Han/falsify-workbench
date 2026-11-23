@@ -891,9 +891,8 @@ function cleanPatternText(value, maxLen, required = false) {
 
 function validateHistoryJiraLinkBody(body) {
   const allowed = ['issueKey', 'pageId', 'patternKey', 'patternLabel', 'summary', 'revisionSha256'];
-  const required = ['issueKey', 'pageId', 'patternKey'];
   if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request');
-  if (Object.keys(body).some(k => !allowed.includes(k)) || required.some(k => !Object.hasOwn(body, k))) {
+  if (Object.keys(body).some(k => !allowed.includes(k))) {
     fail(400, 'invalid_request');
   }
   let issueKey;
@@ -904,11 +903,8 @@ function validateHistoryJiraLinkBody(body) {
   const patternKey = cleanPatternText(body.patternKey, 160, true);
   const patternLabel = cleanPatternText(body.patternLabel, 240, false) || patternKey;
   const summary = cleanPatternText(body.summary, 400, false);
-  const revisionSha256 = body.revisionSha256 === undefined || body.revisionSha256 === null || body.revisionSha256 === ''
-    ? null
-    : (typeof body.revisionSha256 === 'string' && HEX64.test(body.revisionSha256.trim().toLowerCase())
-      ? body.revisionSha256.trim().toLowerCase()
-      : fail(400, 'invalid_request'));
+  const revisionSha256 = cleanPatternText(body.revisionSha256, 64).toLowerCase() || null;
+  if (revisionSha256 && !HEX64.test(revisionSha256)) fail(400, 'invalid_request');
   return { issueKey, pageId, patternKey, patternLabel, summary, revisionSha256 };
 }
 
@@ -1119,7 +1115,7 @@ function readCsvBytes(csv) {
 function validateSubmitFields(body) {
   const allowed = ['participant', 'condition', 'filename', 'csv', 'archive', 'issueKey', 'resume'];
   const required = ['participant', 'condition', 'filename', 'csv', 'archive'];
-  if (Object.keys(body).some(k => !allowed.includes(k)) || required.some(k => !Object.hasOwn(body, k))) {
+  if (Object.keys(body).some(k => !allowed.includes(k))) {
     fail(400, 'invalid_request');
   }
   return { csvBytes: readCsvBytes(body.csv), resume: parseResumeHint(body.resume) };
