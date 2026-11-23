@@ -70,6 +70,7 @@
     "staging": {
       "name": "falsify-cloud-api-staging",
       "vars": {
+        "W8_TEAM_ENABLED": "true",
         "ALLOWED_ORIGINS": "https://shinick-han.github.io,http://127.0.0.1:7849,http://localhost:7849",
         "REMOTE_PROVIDER": "confluence",
         "CONFLUENCE_SITE_URL": "https://falsify.atlassian.net",

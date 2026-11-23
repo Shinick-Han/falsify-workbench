@@ -84,6 +84,7 @@ function baseEnv(overrides = {}) {
     CONFLUENCE_PARENT_PAGE_ID: PARENT,
     ALLOWED_ORIGINS: `${ORIGIN},${OTHER_ORIGIN}`,
     CONFLUENCE_ONLY: 'true',
+    W8_TEAM_ENABLED: 'true',
     ...overrides,
   };
 }
@@ -821,6 +822,14 @@ describe('W8 Stage 2 team delivery gateway', { concurrency: false }, () => {
     const zeroValidated = await validateW8BlueArchive(zeroArchive);
     assert.equal(zeroValidated.normalized.findingCount, 0);
     assert.equal(typeof canonicalJson(zeroValidated.normalized), 'string');
+  });
+
+  test('the model Worker leaves the team routes on the team Worker', async () => {
+    const request = () => new Request('https://worker.example/v1/w8/capabilities', {
+      headers: { Origin: ORIGIN },
+    });
+    assert.equal((await worker.fetch(request(), baseEnv({ W8_TEAM_ENABLED: undefined }))).status, 404);
+    assert.equal((await worker.fetch(request(), baseEnv())).status, 200);
   });
 
   test('worker fetch routes /v1/w8/* with strict CORS and redacted logs', async () => {

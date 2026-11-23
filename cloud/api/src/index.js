@@ -725,7 +725,7 @@ async function dispatchApiRequest(request, env, url, matched, config) {
 }
 
 // Booth, paper search, AI, W8 paper links, W8 team, Confluence and legacy records routes stay distinct; none of them fall through.
-function matchRequest(pathname) {
+function matchRequest(pathname, teamEnabled) {
   const none = { recipes: null, mcp: null, booth: null, papers: null, ai: null, paperLinks: null, w8: null, confluence: null, matched: null };
   const recipes = matchBoothRecipes(pathname);
   if (recipes) return { ...none, recipes };
@@ -738,7 +738,7 @@ function matchRequest(pathname) {
   if (ai) return { ...none, ai };
   const paperLinks = matchW8PaperLinks(pathname);
   if (paperLinks) return { ...none, paperLinks };
-  const w8 = matchW8(pathname);
+  const w8 = teamEnabled ? matchW8(pathname) : null;
   if (w8) return { ...none, w8 };
   const confluence = matchConfluence(pathname);
   if (confluence) return { ...none, confluence };
@@ -870,7 +870,7 @@ export default {
     const origin = request.headers.get('Origin');
     const config = settings(env);
     const allowed = origin !== null && config.origins.has(origin);
-    const matched = matchRequest(url.pathname);
+    const matched = matchRequest(url.pathname, env.W8_TEAM_ENABLED === 'true');
     const corsAllowed = allowed || isAiPreviewOriginAllowed(env, origin, request, matched.ai);
     const logRoute = logRouteFor(matched);
     let response;

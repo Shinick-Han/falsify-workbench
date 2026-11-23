@@ -58,6 +58,7 @@ function baseEnv(overrides = {}) {
     CONFLUENCE_PARENT_PAGE_ID: LEGACY_PARENT,
     ALLOWED_ORIGINS: ORIGIN,
     CONFLUENCE_ONLY: 'true',
+    W8_TEAM_ENABLED: 'true',
     ...overrides,
   };
 }
