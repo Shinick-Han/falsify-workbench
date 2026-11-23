@@ -109,7 +109,7 @@
   /* The hint block around a number cluster (page fractions): grows from the seed cluster across
      same-row table cells/row names (stopping before a column gutter) and up to header rows. */
   function hintBlock(items, seed, lineH){
-    const boxes=(Array.isArray(items)?items:[]).map(item=>item&&item.rect).filter(r=>r&&r.w>0&&r.h>0);
+    const boxes=new Set((Array.isArray(items)?items:[]).map(item=>item&&item.rect).filter(r=>r&&r.w>0&&r.h>0));
     let block={x:seed.x,y:seed.y,w:seed.w,h:seed.h};
     const vReach=Math.max(0,Number(lineH)||0)*1.6;
     const hReach=Math.max(0.03,Math.min(0.035,(Number(lineH)||0)*2.5));
@@ -122,6 +122,7 @@
         const rowBand={x:Math.max(0,block.x-hReach),y:block.y,w:block.w+hReach*2,h:block.h};
         if(!overlaps(r,aboveBand)&&!overlaps(r,rowBand)) continue;
         block=union(block,r);
+        boxes.delete(r);
         changed=true;
       }
     }

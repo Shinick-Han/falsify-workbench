@@ -400,6 +400,9 @@ test('tokenAt, tokensIn, numericToken, placePopover, keyboardInset and hintBlock
   assert.ok(Math.abs(block.y - 0.090) < 1e-9, 'header row included');
   assert.ok(block.x + block.w < 0.5, 'right column stays out');
   assert.ok(block.y + block.h < 0.177, 'caption below stays out');
+  // The far edge rounds down when represented as x + width.
+  const rounded = pe.hintBlock([{rect: R(0.09, 0.1, 0.12, 0.02)}], R(0.05, 0.1, 0.06, 0.02), 0.02);
+  assert.ok(Math.abs(rounded.w - 0.16) < 1e-12);
   assert.equal(pe.fitZoom(0.377, 0, 3.5), 2.65);
 });
 
