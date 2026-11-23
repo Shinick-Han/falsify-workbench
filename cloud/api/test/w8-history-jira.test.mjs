@@ -783,7 +783,7 @@ describe('w8-history-jira: end-to-end /v1/w8/history/jira routing via handleW8 a
   }
 
   test('routes /v1/w8/history/jira through handleW8 with history OAuth session and rejects non-GET and missing Jira scope', async () => {
-    const env = baseEnv({ ALLOWED_ORIGINS: ORIGIN, CONFLUENCE_ONLY: 'true' });
+    const env = baseEnv({ ALLOWED_ORIGINS: ORIGIN, CONFLUENCE_ONLY: 'true', W8_TEAM_ENABLED: 'true' });
     let activeScopes = ['offline_access', 'read:confluence-user', JIRA_READ_SCOPE];
     const fetchImpl = async (url, init = {}) => {
       const u = new URL(url);
