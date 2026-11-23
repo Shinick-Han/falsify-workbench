@@ -17,7 +17,11 @@
     if (!edits.length) return;
     const entry = load(hash, root.localStorage);
     if (entry.edits.length) return;
-    entry.edits = edits.map(({id, pageIndex, originalText, newText}) => ({id, pageIndex, originalText, newText}));
+    entry.edits = edits.map(edit => {
+      const { id, pageIndex, originalText, newText } = edit;
+      const context = /^\d+(?:\.\d+)?$/.test(newText) ? root.FalsifyBoothRecipe?.editContext?.(edit) : '';
+      return { id, pageIndex, originalText, newText, ...(context ? { context } : {}) };
+    });
     root.localStorage.setItem(key(hash), JSON.stringify(entry));
   }
 

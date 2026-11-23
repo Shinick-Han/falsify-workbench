@@ -300,7 +300,7 @@
   function parsePageIndexFromSegmentId(segmentId){
     if(typeof segmentId !== 'string' || !segmentId) return null;
     const s = segmentId.trim();
-    const pb = /^p([0-9]{1,6})-b([0-9]{1,6})$/i.exec(s);
+    const pb = /^p([0-9]{1,6})-[a-z0-9]/i.exec(s);
     if(pb) return parsePageFromOneBased(pb);
     const ocr = /^ocr-page-([0-9]{1,6})$/i.exec(s);
     if(ocr){ const p = Number(ocr[1]); return Number.isSafeInteger(p) && p >= 0 ? p : null; }

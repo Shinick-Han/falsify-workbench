@@ -256,3 +256,12 @@ test('does not connect a revised value mentioned only in evidence for a differen
     ...finding, evidence: [], quote: 'The other group measured 0.280.',
   }]).match.verdict, 'missed');
 });
+
+test('an explicitly located numeric edit uses its source row when the same value occurs elsewhere', () => {
+  const edit = { pageIndex: 4, originalText: '0.18', newText: '0.28', context: 'Treatment' };
+  const other = { id: 'control', pageIndex: 4, quote: 'Control 0.28', rationale: 'The control estimate contradicts the results.' };
+  const same = { id: 'treatment', pageIndex: 4, quote: 'Treatment 0.28', rationale: 'The treatment estimate contradicts the results.' };
+  const matcher = loadBrowserMatcher();
+  assert.equal(matcher.match(edit, [other]).verdict, 'missed');
+  assert.deepEqual(matcher.match(edit, [other, same]).links, ['treatment']);
+});

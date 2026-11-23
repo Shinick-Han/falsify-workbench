@@ -897,6 +897,20 @@
     const hit=indexedPages().find(p=>p.pageIndex===page-1);
     return hit?hit.text:'';
   }
+  function editContext(edit){
+    const page=indexedPages().find(p=>p.pageIndex===edit.pageIndex)
+      || indexFromTextLayer().find(p=>p.pageIndex===edit.pageIndex);
+    const rect=edit.rects?.[0];
+    if(!page||!rect) return '';
+    const center={x:rect.x+rect.w/2,y:rect.y+rect.h/2};
+    const hits=scan([page],edit.originalText).filter(hit=>rectsForSpan(page,hit.start,hit.end)
+      .some(r=>r.x<=center.x&&center.x<=r.x+r.w&&r.y<=center.y&&center.y<=r.y+r.h));
+    if(hits.length!==1) return '';
+    const {start}=hits[0];
+    const from=Math.max(0,start-WINDOW);
+    const context=page.text.slice(from,start);
+    return (from>0&&!/\s/.test(page.text[from-1])?context.replace(/^\S+/, ''):context).trim();
+  }
   function paperInfo(){
     const paper=isWorkbench()?localPaper():boothCurrent();
     const hash=paper?.file?paper.id.slice(6):'';
@@ -1381,7 +1395,7 @@
   }
 
   root.FalsifyBoothRecipe=Object.freeze({
-    validate,apply,pageText,paperInfo,currentPage,setAssist,assist,
+    validate,apply,pageText,paperInfo,currentPage,setAssist,assist,editContext,
     normalizeText,indexPage,locate,searchHits,cropBox,
     SCHEMA
   });

@@ -269,12 +269,21 @@
     return changedNumbers(edit.before, edit.after).some(number => numberAppears(claim, number));
   }
 
+  function matchesNumericContext(edit, claim) {
+    const anchors = tokens(edit.context).filter(word => /\p{L}{4}/u.test(word));
+    if (!anchors.length) return true;
+    const text = fold(claim);
+    return anchors.some(word => findWhole(text, word) >= 0);
+  }
+
   function judge(edit, finding) {
     const after = typeof edit.after === 'string' ? edit.after : '';
     const foldedAfter = fold(after);
     const texts = quoteTexts(finding);
     const local = pageQuotes(finding, edit.pageIndex);
     const numeric = /^\d+(?:\.\d+)?$/.test(foldedAfter);
+    const claim = [findingPageIndex(finding) === edit.pageIndex ? bestQuote(finding) : '', finding.rationale].join(' ');
+    if (numeric && !matchesNumericContext(edit, claim)) return { verdict: '', ratio: 0, numHit: false };
     const contained = foldedAfter.length >= 4 && (numeric
       ? [...local, ...unpagedEvidenceQuotes(finding, edit.pageIndex)].some(text => numberAppears(text, foldedAfter))
       : texts.some(text => fold(text).includes(foldedAfter)));
@@ -411,6 +420,7 @@
       pageIndex: edit.pageIndex,
       before,
       after,
+      context: typeof edit.context === 'string' ? edit.context : '',
       defectType: typeof edit.defectType === 'string' ? edit.defectType : '',
     };
   }
