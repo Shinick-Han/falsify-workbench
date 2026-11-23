@@ -41,6 +41,7 @@
   "coverage": {
     "complete": true,
     "calls": 1,
+    "requiredCalls": 1,
     "chunks": 1,
     "completedChunks": 1,
     "reread": {

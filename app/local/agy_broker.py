@@ -768,7 +768,7 @@ class AgyBrokerServer:
             thread = threading.Thread(target=self._handle_connection, args=(conn,), daemon=True)
             with self._state_lock:
                 self._conn_threads.add(thread)
-            thread.start()
+                thread.start()
 
     def close(self):
         with self._state_lock:
