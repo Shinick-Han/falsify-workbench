@@ -536,12 +536,28 @@
     status.setAttribute('aria-live', 'polite');
     status.setAttribute('data-w8-status', 'true');
 
-    section.append(makeEl(doc, 'h3', 'W8 CSV 내보내기'), fields, runsFieldset, summary, actions);
-    if (team.disclosure) section.append(team.disclosure, team.receiptBox);
-    section.append(status);
+    const details = makeEl(doc, 'details');
+    details.className = 'w8-csv-details';
+    details.setAttribute('data-w8-csv-details', 'true');
+    details.open = false;
+
+    const detailsSummary = makeEl(doc, 'summary', 'W8 CSV 내보내기');
+    detailsSummary.className = 'w8-csv-summary';
+    detailsSummary.setAttribute('data-w8-csv-summary', 'true');
+
+    const body = makeEl(doc, 'div');
+    body.className = 'w8-csv-body';
+    body.append(fields, runsFieldset, summary, actions);
+    if (team.disclosure) body.append(team.disclosure, team.receiptBox);
+    body.append(status);
+
+    details.append(detailsSummary, body);
+    section.append(details);
 
     return {
       section,
+      details,
+      detailsSummary,
       participantInput: pField.input,
       conditionInput: cField.input,
       runsList,
@@ -695,6 +711,11 @@
       const selected = getSelectedNorm();
       const stats = countSelectionStats(selected);
       const fileCond = resolveExportCondition(cleanString(ui.conditionInput.value), selected.map(r => r.raw));
+      if (ui.detailsSummary) {
+        ui.detailsSummary.textContent = hasRuns
+          ? 'W8 CSV 내보내기 · 실행 ' + selected.length + '건 · 지적 ' + stats.findingCount + '건'
+          : 'W8 CSV 내보내기';
+      }
       ui.summary.textContent = hasRuns ? formatSummaryText(selected.length, stats, buildFilename(ui.participantInput.value, fileCond)) : '';
       ui.downloadBtn.disabled = selected.length === 0;
       if (ui.submitBtn) ui.submitBtn.disabled = state.submitting || selected.length === 0;
@@ -740,6 +761,7 @@
         persistInputs();
         return true;
       }
+      if (ui.details) ui.details.open = true;
       setStatusMessage(ui.status, '참가자 이름을 입력하세요.', true);
       if (typeof ui.participantInput.focus === 'function') ui.participantInput.focus();
       return false;

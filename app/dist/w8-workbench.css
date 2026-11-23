@@ -105,15 +105,32 @@ html[data-w8-workbench] .skip-link:not(:focus) { clip-path: inset(50%); opacity:
 /* Quiet white event panels inside #w8-review (overrides legacy airport hosted-ai.css). */
 #w8-review .w8-blue-runner,
 #w8-review .w8-blue-results-panel,
-#w8-grading > details,
+#w8-review .w8-blue-edit-results,
 #w8-csv > section {
   min-width: 0; max-width: 100%; margin: 0; padding: 16px;
   border: 0; border-radius: 10px; background: var(--ev-card);
   box-shadow: 0 1px 0 rgba(22, 25, 30, .04);
 }
+#w8-review .w8-blue-edit-results { display: grid; gap: 10px; }
+#w8-review .w8-blue-edit-results > h3 { margin: 0; }
+#w8-review .w8-blue-edit-results .w8-grading-item { display: grid; gap: 8px; min-width: 0; }
+#w8-review .w8-blue-edit-results .w8-grading-item + .w8-grading-item { padding-top: 12px; border-top: 1px solid var(--ev-hair); }
 #w8-review .w8-blue-runner { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 #w8-review .w8-blue-runner > * { min-width: 0; max-width: 100%; }
-#w8-review .w8-blue-runner-head { display: grid; gap: 2px; margin: 0; }
+#w8-review .w8-blue-launcher-details { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; max-width: 100%; }
+#w8-review .w8-blue-launcher-summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 44px; cursor: pointer; list-style: none;
+}
+#w8-review .w8-blue-launcher-summary::-webkit-details-marker { display: none; }
+#w8-review .w8-blue-launcher-summary::after {
+  content: "열기 ▾"; flex: none; font-size: 12.5px; font-weight: 500; color: var(--ev-muted); white-space: nowrap;
+}
+#w8-review .w8-blue-launcher-details[open] > .w8-blue-launcher-summary::after { content: "접기 ▴"; }
+#w8-blue-body[data-results="empty"] .w8-blue-launcher-summary::after { display: none; }
+#w8-review .w8-blue-launcher-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 12px; min-width: 0; max-width: 100%; }
+#w8-review .w8-blue-launcher-body > * { min-width: 0; max-width: 100%; }
+#w8-review .w8-blue-runner-head { display: grid; gap: 2px; margin: 0; min-width: 0; }
 #w8-review .w8-blue-runner-head h2 { margin: 0; }
 #w8-review .w8-review-tabs { padding: 4px; width: 100%; max-width: 100%; }
 #w8-review .booth-tab.is-active { background: var(--ev-ink); color: #fff; }
@@ -147,13 +164,25 @@ html[data-w8-workbench] .skip-link:not(:focus) { clip-path: inset(50%); opacity:
 #w8-review details.red-help { border-top: 1px solid var(--ev-hair); padding-top: 10px; margin: 4px 0 0; min-width: 0; }
 #w8-review details.red-help > summary { min-height: 40px; display: flex; align-items: center; font-size: 13px; font-weight: 500; color: var(--ev-ink-2); cursor: pointer; }
 
-/* Results panel, event-style findings, and run cards */
-#w8-review .w8-blue-results-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+/* Results panel, folded disclosures, event-style findings, and run details */
+#w8-review .w8-blue-results-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 #w8-review .w8-blue-results-panel > * { min-width: 0; max-width: 100%; }
 #w8-review .w8-blue-results-head { margin: 0; }
-#w8-review .w8-blue-results-title { margin: 2px 0 4px; font-size: 17px; font-weight: 600; line-height: 1.35; letter-spacing: -.01em; }
+#w8-review .w8-blue-results-title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--ev-muted); }
 #w8-review .w8-blue-filters { gap: 6px; }
-#w8-review .w8-blue-runs-list { display: grid; gap: 10px; padding-top: 10px; border-top: 1px solid var(--ev-hair); }
+#w8-review .w8-blue-fold { min-width: 0; max-width: 100%; }
+#w8-review .w8-blue-fold > .w8-blue-fold-summary {
+  justify-content: space-between; gap: 12px; min-height: 44px; padding: 8px 14px;
+  border: 1px solid var(--ev-hair); border-radius: 8px; background: var(--ev-soft);
+  color: var(--ev-ink); font-size: 14px; font-weight: 500; text-align: left;
+}
+#w8-review .w8-blue-fold > .w8-blue-fold-summary::after {
+  content: "열기 ▾"; flex: none; font-size: 12px; font-weight: 500; color: var(--ev-muted); white-space: nowrap;
+}
+#w8-review .w8-blue-fold[open] > .w8-blue-fold-summary { border-color: var(--ev-ink); margin-bottom: 12px; }
+#w8-review .w8-blue-fold[open] > .w8-blue-fold-summary::after { content: "접기 ▴"; }
+#w8-review .w8-blue-runs-body { display: grid; gap: 12px; min-width: 0; max-width: 100%; }
+#w8-review .w8-blue-runs-list { display: grid; gap: 10px; }
 #w8-review .w8-blue-runs-list .hosted-ai-candidate { padding: 12px; border: 1px solid var(--ev-hair); border-radius: 8px; background: var(--ev-soft); }
 #w8-review #w8-blue-findings-list { display: grid; gap: 0; margin: 0; }
 #w8-review .w8-finding-card {
@@ -169,21 +198,27 @@ html[data-w8-workbench] .skip-link:not(:focus) { clip-path: inset(50%); opacity:
 #w8-review .hosted-ai-candidate, #w8-review .hosted-ai-item { overflow-wrap: anywhere; }
 #w8-review .form-feedback.error { color: var(--ev-fail); }
 
-/* Grading & CSV panels aligned to event tokens */
-#w8-grading:not([hidden]), #w8-csv:has(> :not([hidden])) { margin-top: 0; }
-#w8-grading .w8-grading-summary { min-height: 44px; display: flex; align-items: center; font-size: 15px; font-weight: 600; color: var(--ev-ink); cursor: pointer; }
-#w8-grading .w8-grading-body { display: grid; gap: 14px; margin-top: 10px; }
-#w8-grading .w8-grading-run { display: grid; gap: 10px; padding-top: 10px; border-top: 1px solid var(--ev-hair); }
-#w8-grading .w8-grading-run:first-child { padding-top: 0; border-top: 0; }
-#w8-grading .w8-grading-item { display: grid; gap: 8px; padding: 12px 0 0; border-top: 1px solid var(--ev-hair); }
-#w8-grading .w8-grading-run > .w8-grading-item:first-of-type { padding-top: 0; border-top: 0; }
-#w8-grading .w8-grading-select-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; color: var(--ev-ink-2); }
-#w8-grading .w8-grading-select-row select { width: auto; min-width: 140px; min-height: 40px; margin-left: 0; }
-#w8-grading .w8-grading-links summary { min-height: 36px; display: flex; align-items: center; font-size: 13px; color: var(--ev-muted); cursor: pointer; }
-#w8-grading .w8-grading-link-opt { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; font-size: 13px; line-height: 1.45; color: var(--ev-ink-2); overflow-wrap: anywhere; }
-#w8-grading .w8-grading-link-opt input { flex: none; width: 18px; height: 18px; margin-top: 2px; accent-color: var(--ev-ink); }
+/* Grading override controls inside #w8-blue-edit-results & collapsible CSV panel */
+#w8-csv:has(> :not([hidden])) { margin-top: 0; }
+#w8-review .w8-grading-select-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; color: var(--ev-ink-2); }
+#w8-review .w8-grading-select-row select { width: auto; min-width: 140px; min-height: 40px; margin-left: 0; }
+#w8-review .w8-grading-links { display: grid; gap: 6px; min-width: 0; }
+#w8-review .w8-grading-links > summary { min-height: 40px; display: flex; align-items: center; font-size: 13px; color: var(--ev-muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+#w8-review .w8-grading-link-opt { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; font-size: 13px; line-height: 1.45; color: var(--ev-ink-2); overflow-wrap: anywhere; }
+#w8-review .w8-grading-link-opt input { flex: none; width: 18px; height: 18px; margin-top: 2px; accent-color: var(--ev-ink); }
+#w8-csv .w8-csv-details { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; max-width: 100%; }
+#w8-csv .w8-csv-summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 44px; font-size: 15px; font-weight: 600; color: var(--ev-ink); cursor: pointer; list-style: none;
+}
+#w8-csv .w8-csv-summary::-webkit-details-marker { display: none; }
+#w8-csv .w8-csv-summary::after {
+  content: "열기 ▾"; flex: none; font-size: 12.5px; font-weight: 500; color: var(--ev-muted); white-space: nowrap;
+}
+#w8-csv .w8-csv-details[open] > .w8-csv-summary::after { content: "접기 ▴"; }
+#w8-csv .w8-csv-body { display: grid; gap: 10px; margin-top: 12px; min-width: 0; max-width: 100%; }
 #w8-csv h3 { margin: 0 0 10px; font-size: 16px; font-weight: 600; }
-#w8-csv fieldset { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--ev-hair); border-radius: 8px; }
+#w8-csv fieldset { margin: 4px 0; padding: 10px 12px; border: 1px solid var(--ev-hair); border-radius: 8px; }
 #w8-csv legend { padding: 0 6px; font-size: 12px; font-weight: 500; color: var(--ev-muted); }
 
 @media (min-width:1024px) {
@@ -227,6 +262,7 @@ html[data-w8-workbench] .skip-link:not(:focus) { clip-path: inset(50%); opacity:
   #w8-blue-ticket-steps i { width: 8px; height: 8px; }
   #w8-blue-verdict .booth-headline { font-size: 36px; line-height: 1.2; }
 
-  .w8-blue-body[data-results="ready"] { grid-template-columns: minmax(0, 1fr) 360px; gap: 22px; }
+  #w8-review .w8-blue-edit-results { padding: 20px 24px; gap: 12px; }
+  .w8-blue-body[data-results="ready"] { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .w8-blue-body[data-results="empty"] { grid-template-columns: minmax(0, 620px); }
 }

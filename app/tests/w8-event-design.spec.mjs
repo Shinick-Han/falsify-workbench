@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
+const w8MatcherSource = await readFile(new URL('../dist/w8-matcher.js', import.meta.url), 'utf8');
 const w8BlueSource = await readFile(fileURLToPath(new URL('../dist/w8-blue.js', import.meta.url)), 'utf8');
 const w8GradingSource = await readFile(fileURLToPath(new URL('../dist/w8-grading.js', import.meta.url)), 'utf8');
 const boothMyAiSource = await readFile(fileURLToPath(new URL('../dist/booth-myai.js', import.meta.url)), 'utf8');
@@ -156,13 +157,11 @@ test('workbench-shell.html includes #booth-ink SVG filter and focusable #w8-revi
   assert.match(shellHtml, /id="w8-review-tab"/);
 });
 
-test('W8 BLUE keeps ungraded results neutral (including 0 findings), preserves partial grading distinct from caught, focuses imported ticket, and preserves runs on failure', async () => {
+test('Native and imported BLUE grade planted edits, restore manual overrides, and retain earlier runs on failure', async () => {
   const doc = makeDoc(true);
   const host = new El('div', doc);
   host.id = 'w8-blue';
-  const gradingHost = new El('div', doc);
-  gradingHost.id = 'w8-grading';
-  doc.body.append(host, gradingHost);
+  doc.body.append(host);
 
   const ls = makeStorage();
   const ss = makeStorage();
@@ -173,10 +172,17 @@ test('W8 BLUE keeps ungraded results neutral (including 0 findings), preserves p
     blueDefaultModel: 'gemini-4-neon-high', blueDefaultEffort: 'high', efforts: ['high'],
     limits: { maxUploadBytes: 33554432, maxPromptChars: 32000 }, blueJobs: true, modelJobs: true
   };
-  const TWO_FINDINGS = [
-    { id: 'F-1', page: 1, locationLabel: 'Table 1', findingType: 'D1', verdictLabel: '아님', severity: '불일치', quote: '28', rationale: 'Table height conflicts with text.' },
-    { id: 'F-2', page: 1, locationLabel: 'Results', findingType: 'D1', verdictLabel: '확인필요', severity: '불일치', quote: '34', rationale: 'Needs raw table check.' }
+  // RAGAS Table 1: the paper quotes the second edited value in a separate PDF block.
+  const evidence = [
+    { segmentId: 'p5-b2', quote: '0.48', relation: 'contradicts' },
+    { segmentId: 'p5-b4', quote: 'Ragas 0.65 0.70 GPT Score 0.72 0.52 0.63 GPT Ranking 0.54 0.40 0.52', relation: 'contradicts' }
   ];
+  const findings = Array.from({ length: 10 }, (_, i) => ({
+    id: 'F' + (i + 1), page: i < 4 ? 5 : 4,
+    quote: i < 3 ? 'Our proposed metrics are much closer aligned with the human judgements.' : 'WikiEval',
+    rationale: i < 3 ? 'Table 1 contradicts the conclusion about Ragas.' : 'Review the dataset methodology.',
+    evidence: i < 3 ? evidence : []
+  }));
 
   const fetchImpl = async (url, init = {}) => {
     const u = new URL(url);
@@ -193,7 +199,7 @@ test('W8 BLUE keeps ungraded results neutral (including 0 findings), preserves p
     }
     if (u.pathname === '/v1/ai/jobs/job-check-1') {
       await new Promise(resolve => { releasePoll = resolve; });
-      return respond({ job: { id: 'job-check-1', role: 'blue', state: 'completed', model: 'gemini-4-neon-high', result: { status: 'ok', findings: TWO_FINDINGS } } });
+      return respond({ job: { id: 'job-check-1', role: 'blue', state: 'completed', model: 'gemini-4-neon-high', result: { status: 'ok', findings } } });
     }
     return respond({ error: { code: 'not_found' } }, 404);
   };
@@ -215,6 +221,7 @@ test('W8 BLUE keeps ungraded results neutral (including 0 findings), preserves p
   sandbox.window = sandbox;
   vm.runInNewContext(promptInstSource, sandbox, { filename: 'prompt-instructions.js' });
   vm.runInNewContext(w8BlueSource, sandbox, { filename: 'w8-blue.js' });
+  vm.runInNewContext(w8MatcherSource, sandbox, { filename: 'w8-matcher.js' });
   vm.runInNewContext(w8GradingSource, sandbox, { filename: 'w8-grading.js' });
 
   const blue = sandbox.FalsifyW8Blue.mount(host, {
@@ -234,10 +241,9 @@ test('W8 BLUE keeps ungraded results neutral (including 0 findings), preserves p
 
   // Capture 2 synthetic RED edits for grading
   sandbox.FalsifyW8Grading.capture(PDF_SHA, [
-    { id: 'e1', pageIndex: 0, originalText: '18', newText: '28' },
-    { id: 'e2', pageIndex: 0, originalText: '24', newText: '34' }
+    { id: 'e1', pageIndex: 4, originalText: '0.95', newText: '0.65' },
+    { id: 'e2', pageIndex: 4, originalText: '0.78', newText: '0.48' }
   ]);
-  sandbox.FalsifyW8Grading.mount(gradingHost, () => blue.runs());
 
   // Start hosted BLUE -> checking ticket visible
   host.querySelector('#w8-blue-hosted-run').click();
@@ -247,52 +253,32 @@ test('W8 BLUE keeps ungraded results neutral (including 0 findings), preserves p
   assert.equal(host.querySelector('#w8-blue-ticket-wait').hidden, false);
   assert.equal(host.querySelector('#w8-blue-ticket-steps').hidden, false);
 
-  // Complete job (ungraded) -> neutral "검수 완료 · 지적 2건" (never 적발/통과 before grading)
   releasePoll();
   await new Promise(r => setTimeout(r, 50));
-  assert.equal(host.querySelector('#w8-blue-ticket-result').hidden, false);
-  assert.equal(host.querySelector('#w8-blue-ticket').getAttribute('data-state'), 'completed');
-  assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '검수 완료');
-  assert.equal(host.querySelector('#w8-blue-body').getAttribute('data-results'), 'ready');
-  assert.equal(host.querySelector('#w8-blue-run-filters').hidden, true);
-  assert.equal(host.querySelector('#w8-blue-results-title').textContent, '항목별 AI 검증 결과');
-  assert.equal(host.querySelector('#w8-blue-verdict-title').textContent, '검수 완료 · 지적 2건');
-  const cards = host.querySelector('#w8-blue-findings-list').findAll(n => n.tagName === 'ARTICLE');
-  assert.equal(cards.length, 2);
-  for (const card of cards) {
-    assert.ok(!card.textContent.includes('AI가 찾음'), 'ungraded finding must not claim AI가 찾음');
+  assert.equal(host.querySelector('#w8-blue-ticket').getAttribute('data-state'), 'caught');
+  assert.equal(host.querySelector('#w8-blue-verdict-title').textContent, 'AI가 2개를 모두 찾아냈어요');
+  const editHost = host.querySelector('#w8-blue-edit-results');
+  assert.ok(editHost);
+  assert.equal(editHost.findAll(n => n.tagName === 'DEL').length, 2);
+  assert.match(editHost.textContent, /0\.95 → 0\.65/);
+  assert.match(editHost.textContent, /0\.78 → 0\.48/);
+  assert.match(editHost.textContent, /BLUE 근거 · F1/);
+  assert.equal(host.querySelector('#w8-blue-findings-list').findAll(n => n.tagName === 'ARTICLE').length, 10);
+  assert.equal(blue.runs()[0].findings[0].evidence[1].pageIndex, 4);
+
+  function selectVerdict(index, value) {
+    const select = editHost.findAll(n => n.tagName === 'SELECT')[index];
+    select.value = value;
+    select.dispatchEvent(new Event('change'));
   }
-
-  // Grade edit 1 detected + edit 2 partial -> keeps 부분 적발 distinct from 적발
-  const details = gradingHost.querySelector('details');
-  details.open = true;
-  details.dispatchEvent(new Event('toggle'));
-  const selects = gradingHost.findAll(n => n.tagName === 'SELECT');
-  assert.equal(selects.length, 2);
-  selects[0].value = 'detected';
-  selects[0].dispatchEvent(new Event('change'));
-  assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '채점 중');
-  selects[1].value = 'partial';
-  selects[1].dispatchEvent(new Event('change'));
-  assert.equal(host.querySelector('#w8-blue-ticket').getAttribute('data-state'), 'partial');
-  assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '부분 적발');
+  selectVerdict(1, 'partial');
   assert.equal(host.querySelector('#w8-blue-verdict-title').textContent, '적발 1곳 · 부분 적발 1곳');
-
-  // Grade edit 1 partial + edit 2 partial -> all partial
-  selects[0].value = 'partial';
-  selects[0].dispatchEvent(new Event('change'));
+  await blue.refresh();
   assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '부분 적발');
-  assert.equal(host.querySelector('#w8-blue-verdict-title').textContent, 'AI가 2개 모두 근처를 짚었어요');
+  selectVerdict(1, 'auto');
+  assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '적발');
 
-  // Grade edit 1 detected + edit 2 missed -> PASSED ("2개 중 1개가 AI 눈을 피했어요")
-  selects[0].value = 'detected';
-  selects[0].dispatchEvent(new Event('change'));
-  selects[1].value = 'missed';
-  selects[1].dispatchEvent(new Event('change'));
-  assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '통과');
-  assert.equal(host.querySelector('#w8-blue-verdict-title').textContent, '2개 중 1개가 AI 눈을 피했어요');
-
-  // External 0-finding ungraded run -> neutral "검수 완료 · 지적 0건" (NEVER 통과) + focuses & scrolls ticket
+  // No findings in a completed blind run means the two edits went undetected.
   host.querySelector('#w8-blue-tab-external').click();
   host.querySelector('#w8-blue-external-answer').value = JSON.stringify({ findings: [] });
   const ticketEl = host.querySelector('#w8-blue-ticket');
@@ -301,9 +287,9 @@ test('W8 BLUE keeps ungraded results neutral (including 0 findings), preserves p
   host.querySelector('#w8-blue-external-import').click();
   await new Promise(r => setTimeout(r, 30));
   assert.equal(blue.runs().length, 2);
-  assert.equal(host.querySelector('#w8-blue-ticket').getAttribute('data-state'), 'completed');
-  assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '검수 완료');
-  assert.equal(verdictTitleEl.textContent, '검수 완료 · 지적 0건');
+  assert.equal(host.querySelector('#w8-blue-ticket').getAttribute('data-state'), 'missed');
+  assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '미검출');
+  assert.equal(verdictTitleEl.textContent, 'AI가 2개 모두 놓쳤어요');
   assert.ok(ticketEl.scrolledIntoView > prevScrolls, 'explicit external import must scroll ticket into view');
   assert.equal(doc.activeElement, verdictTitleEl, 'explicit external import must focus verdict heading');
   const zeroCard = host.querySelector('#w8-blue-findings-list').findAll(n => n.tagName === 'ARTICLE').at(-1);
@@ -316,6 +302,39 @@ test('W8 BLUE keeps ungraded results neutral (including 0 findings), preserves p
   assert.equal(host.querySelector('#w8-blue-ticket').getAttribute('data-state'), 'failed');
   assert.equal(host.querySelector('#w8-blue-stamp-word').textContent, '실패');
   assert.equal(blue.runs().length, 2);
+});
+
+test('saved runs reuse the local key, respect manual decisions, and distinguish incomplete review from a miss', () => {
+  const storage = makeStorage();
+  const sandbox = { localStorage: storage };
+  sandbox.window = sandbox;
+  vm.runInNewContext(w8MatcherSource, sandbox);
+  vm.runInNewContext(w8GradingSource, sandbox);
+  const grading = sandbox.FalsifyW8Grading;
+  const run = { id: 'hosted-existing', fileHash: PDF_SHA, status: 'ok', findings: [{
+    id: 'F1', pageIndex: 4, quote: 'The results in Table 1',
+    evidence: [{ quote: '0.48' }, { quote: 'Ragas 0.65 0.70' }]
+  }] };
+  assert.equal(grading.summary(run, storage), null);
+  grading.capture(PDF_SHA, [
+    { id: 'one', pageIndex: 4, originalText: '0.95', newText: '0.65' },
+    { id: 'two', pageIndex: 4, originalText: '0.78', newText: '0.48' }
+  ]);
+  assert.equal(grading.summary(run, storage).detected, 2, 'old same-page RAGAS evidence had no per-quote page');
+  assert.equal(grading.summary({ ...run, findings: [{ ...run.findings[0], pageIndex: 2 }] }, storage).missed, 2);
+  assert.equal(grading.summary({ ...run, findings: [] }, storage).missed, 2);
+  for (const patch of [{ status: 'refusal' }, { partial: true }, { status: 'abstain' },
+    { coverage: { complete: false } }, { coverage: { batchStatuses: ['ok','refusal'] } },
+    { findings: [{ id: 'F1', quote: '0.48' }] }]) {
+    assert.equal(grading.summary({ ...run, ...patch }, storage).pending, 2);
+  }
+  const key = 'falsify.w8.grading.' + PDF_SHA;
+  const saved = JSON.parse(storage.getItem(key));
+  saved.decisions[JSON.stringify([run.id, 'two'])] = { verdict: 'partial', links: [] };
+  storage.setItem(key, JSON.stringify(saved));
+  assert.equal(grading.summary(run, storage).partial, 1);
+  assert.equal(grading.summary({ ...run, id: 'another-run' }, storage).detected, 2);
+  assert.equal(grading.summary({ ...run, fileHash: 'other-paper' }, storage), null);
 });
 
 test('booth-myai.js W8 CTA omits button on 0 applied, checks state.sourceSha256, scrolls/focuses review across aria-busy, and stays isolated from event.html', async () => {

@@ -217,22 +217,6 @@
     if(f.verdictLabel) return { text: f.verdictLabel, kind: 'caught' };
     return { text: '지적', kind: 'excluded' };
   }
-  function readGradingSummary(ls, fileHash, runId){
-    if(!ls || !fileHash || !runId) return null;
-    const data = readJson(ls, 'falsify.w8.grading.' + fileHash);
-    if(!data || !Array.isArray(data.edits) || !data.edits.length) return null;
-    const decisions = isObj(data.decisions) ? data.decisions : {};
-    let detected = 0, partial = 0, missed = 0, pending = 0;
-    for(const edit of data.edits){
-      const rec = decisions[JSON.stringify([runId, edit.id])] || {};
-      const v = rec.verdict || 'pending';
-      if(v === 'detected') detected++;
-      else if(v === 'partial') partial++;
-      else if(v === 'missed') missed++;
-      else pending++;
-    }
-    return { total: data.edits.length, detected, partial, missed, pending };
-  }
   function formatGradingSub(g, metaParts){
     const parts = [];
     if(g.detected) parts.push('적발 ' + g.detected + '곳');
@@ -248,10 +232,10 @@
       return { state: 'review', stamp: { kind: 'void', word: '채점 중', latin: 'GRADING', wide: true }, lead: '채점 ', strong: (n - g.pending) + '/' + n + '곳 진행 중', sub };
     }
     if(g.missed === n){
-      return { state: 'missed', stamp: { kind: 'pass', word: '통과', latin: 'PASSED' }, lead: 'AI가 ', strong: n > 1 ? n + '개 모두 놓쳤어요' : '못 찾았어요', sub };
+      return { state: 'missed', stamp: { kind: 'void', word: '미검출', latin: 'MISSED' }, lead: 'AI가 ', strong: n > 1 ? n + '개 모두 놓쳤어요' : '못 찾았어요', sub };
     }
     if(g.missed > 0){
-      return { state: 'missed', stamp: { kind: 'pass', word: '통과', latin: 'PASSED' }, lead: n + '개 중 ' + g.missed + '개가 ', strong: 'AI 눈을 피했어요', sub };
+      return { state: 'missed', stamp: { kind: 'void', word: '미검출', latin: 'MISSED' }, lead: n + '개 중 ' + g.missed + '개가 ', strong: 'AI 눈을 피했어요', sub };
     }
     if(g.detected === n){
       return { state: 'caught', stamp: { kind: 'fail', word: '적발', latin: 'DETECTED' }, lead: 'AI가 ', strong: n > 1 ? n + '개를 모두 찾아냈어요' : '찾아냈어요', sub };
@@ -281,7 +265,7 @@
       ? { kind: 'void', word: '부분 완료', latin: 'PARTIAL', wide: true }
       : { kind: 'void', word: '검수 완료', latin: 'DONE', wide: true };
     const findings = Array.isArray(run.findings) ? run.findings : [];
-    const leadParts = findings.length ? [...formatFindingCounts(findings), '미채점'] : ['미채점'];
+    const leadParts = findings.length ? formatFindingCounts(findings) : [];
     return {
       state: 'completed',
       stamp,
@@ -293,8 +277,12 @@
   function summarizeRunTicket(run, runNumber, grading){
     const metaParts = ['#' + runNumber, run.detector || 'BLUE', cleanModel(run.model), cleanStr(run.condition)].filter(Boolean);
     if(run.partial || run.status === 'interrupted') metaParts.push('부분 결과');
-    const hasGraded = Boolean(grading && grading.total > 0 && grading.pending < grading.total);
-    return hasGraded ? summarizeGradedTicket(grading, metaParts) : summarizeUngradedTicket(run, metaParts);
+    if (!grading) return summarizeUngradedTicket(run, metaParts);
+    if (grading.pending === grading.total) return {
+      state: 'review', stamp: { kind: 'void', word: '판정 보류', latin: 'REVIEW', wide: true },
+      lead: '심은 결함 ', strong: grading.total + '곳 판정 보류', sub: metaParts.join(' · ')
+    };
+    return summarizeGradedTicket(grading, metaParts);
   }
   function cleanModel(value){
     const s = cleanStr(value, 120);
@@ -356,7 +344,7 @@
     const seg = segments.find(s => s && s.id === item.segmentId);
     return usableLabel(seg?.label);
   }
-  function normalizeEvidenceEntry(entry){
+  function normalizeEvidenceEntry(entry, segments){
     if(typeof entry === 'string'){
       const q = entry.trim();
       return q ? { quote: q, relation: '' } : null;
@@ -365,14 +353,18 @@
     const quote = cleanStr(entry.quote ?? entry.text);
     const baseRel = cleanStr(entry.relation ?? entry.reason ?? entry.detail);
     const metaRel = baseRel || [entry.label, entry.title, entry.doi, entry.url].map(x => cleanStr(x)).filter(Boolean).join(' · ');
-    return quote || metaRel ? { quote, relation: metaRel } : null;
+    if(!quote && !metaRel) return null;
+    const item = { quote, relation: metaRel };
+    const pageIndex = resolvePageIndex(entry, segments);
+    if(pageIndex !== null) item.pageIndex = pageIndex;
+    return item;
   }
-  function normalizeEvidence(raw){
+  function normalizeEvidence(raw, segments){
     if(!raw) return [];
     const list = Array.isArray(raw) ? raw : [raw];
     const out = [];
     for(const entry of list){
-      const item = normalizeEvidenceEntry(entry);
+      const item = normalizeEvidenceEntry(entry, segments);
       if(item) out.push(item);
     }
     return out;
@@ -513,7 +505,8 @@
   function convertLedgerFinding(f, idx, segments, hosted){
     const rawQuote = cleanStr(f?.quote);
     const quote = hosted ? stripLegacyHbPrefix(rawQuote) : rawQuote;
-    const ev = normalizeEvidence(f?.evidence).map(e => ({
+    const ev = normalizeEvidence(f?.evidence, segments).map(e => ({
+      ...e,
       quote: hosted ? stripLegacyHbPrefix(e.quote) : e.quote,
       relation: e.relation
     }));
@@ -641,9 +634,9 @@
       findingType: cleanStr(src.findingType || src.defectFamily || src.type, 120),
       verdictLabel: cleanStr(src.verdictLabel || src.verdict, 80),
       severity: cleanStr(src.severity, 80),
-      quote: cleanStr(src.quote),
+      quote: cleanStr(src.quote || src.sourceQuote),
       rationale: cleanStr(src.rationale || src.summary || src.message),
-      evidence: normalizeEvidence(src.evidence),
+      evidence: normalizeEvidence(src.evidence, segments),
       confidence: cleanStr(src.confidence, 80),
       uncertainty: cleanStr(src.uncertainty || src.additionalInfo || src.neededInfo),
       status: cleanStr(src.status || src.state, 40),
@@ -665,7 +658,7 @@
       severity: cleanStr(src.severity, 80),
       quote: cleanStr(src.quote || src.sourceQuote),
       rationale: cleanStr(src.rationale),
-      evidence: normalizeEvidence(src.evidence),
+      evidence: normalizeEvidence(src.evidence, segments),
       confidence: cleanStr(src.confidence, 80),
       uncertainty: cleanStr(src.uncertainty || src.additionalInfo || src.neededInfo),
       status: cleanStr(src.status || src.state, 40),
@@ -686,10 +679,10 @@
   function isExplicitZeroFindingResponse(raw){
     const obj = parseJsonBlock(raw);
     if(!isObj(obj)) return false;
-    if(obj.error || obj.status === 'failed' || obj.status === 'error') return false;
+    if(obj.error || (obj.status && obj.status !== 'ok')) return false;
     const list = obj.findings ?? obj.verdicts ?? obj.items;
     if(Array.isArray(list) && list.length === 0) return true;
-    return ['ok', 'abstain', 'refusal'].includes(obj.status) && list === undefined;
+    return obj.status === 'ok' && list === undefined;
   }
   function hasValidHostedFindings(job){
     if(!isObj(job) || !isObj(job.result)) return false;
@@ -1511,6 +1504,7 @@
         try{
           const saved = await persistHostedBlueResult(job, meta);
           const count = saved ? saved.findings.length : 0;
+          if(saved && st.artifact?.sha256 === saved.fileHash && st.filterRunId !== 'all') st.filterRunId = saved.id;
           st.hostedStatus = job.state === 'interrupted'
             ? '중단된 부분 결과를 기록했습니다 · 지적 ' + count + '건'
             : '내장 BLUE 완료 · 지적 ' + count + '건 자동 기록됨';
@@ -1760,6 +1754,7 @@
     function buildExternalRecord(art, batch, segInfo, meta){
       const nowIso = new Date(d.nowFn()).toISOString();
       const zero = !batch.items.length && isExplicitZeroFindingResponse(meta.raw);
+      const parsed = parseJsonBlock(meta.raw);
       return {
         id: makeId('ext', d.cryptoApi),
         fileHash: art.sha256,
@@ -1772,7 +1767,8 @@
         condition: cleanStr(meta.conditionInput || batch.condition, 160),
         promptLabel: st.promptLabel,
         privatePrompt: st.privatePrompt,
-        status: zero && batch.status === 'unparsed' ? 'ok' : (cleanStr(batch.status, 32) || 'ok'),
+        partial: parsed?.partial === true || parsed?.coverage?.complete === false,
+        status: cleanStr(parsed?.status, 32) || (zero ? 'ok' : (cleanStr(batch.status, 32) || 'ok')),
         report: cleanStr(batch.report),
         zeroDropSummary: batch.zeroDropSummary ? clone(batch.zeroDropSummary) : null,
         diagnostics: Array.isArray(batch.diagnostics) ? clone(batch.diagnostics) : [],
@@ -1830,6 +1826,7 @@
         st.lastTerminalState = '';
         st.externalError = '';
         st.externalStatus = externalSummaryLine(saved, batch);
+        if(st.filterRunId !== 'all') st.filterRunId = saved.id;
         if(nodes.externalAnswer) nodes.externalAnswer.value = '';
         if(nodes.externalFile) nodes.externalFile.value = '';
         notifyRunsChange(true);
@@ -2299,26 +2296,42 @@
 
       nodes.ticketLive = createEl(d.doc, 'div', { id: 'w8-blue-live', className: 'booth-live', 'data-state': 'pending' },
         nodes.ticketSteps, nodes.verdictBox);
+      nodes.editResults = createEl(d.doc, 'section', {
+        id: 'w8-blue-edit-results',
+        className: 'booth-panel booth-declared w8-blue-edit-results',
+        hidden: true,
+        'aria-label': '내가 심은 결함'
+      });
       nodes.ticketSection = createEl(d.doc, 'section', { id: 'w8-blue-ticket-section', className: 'w8-blue-ticket-section', hidden: true, 'aria-label': 'AI 검증 티켓 요약' },
-        nodes.ticket, nodes.ticketLive);
+        nodes.ticket, nodes.ticketLive, nodes.editResults);
       return nodes.ticketSection;
     }
+    const layout = { hash: null, completedRuns: 0, state: '', attention: '' };
     function buildDom(){
       clearNode(host);
       nodes.docMeta = createEl(d.doc, 'p', { id: 'w8-blue-doc-meta', className: 'muted', textContent: '검수할 PDF를 먼저 열어 주세요.' });
       nodes.tabHosted = createEl(d.doc, 'button', { id: 'w8-blue-tab-hosted', type: 'button', className: 'booth-tab is-active', 'aria-pressed': 'true', textContent: '내장 BLUE' });
       nodes.tabExternal = createEl(d.doc, 'button', { id: 'w8-blue-tab-external', type: 'button', className: 'booth-tab', 'aria-pressed': 'false', textContent: '내 AI' });
-      nodes.tabHosted.addEventListener('click', () => { st.mode = 'hosted'; render(); });
-      nodes.tabExternal.addEventListener('click', () => { st.mode = 'external'; render(); });
+      nodes.tabHosted.addEventListener('click', () => { st.mode = 'hosted'; if(nodes.launcherDetails) nodes.launcherDetails.open = true; render(); });
+      nodes.tabExternal.addEventListener('click', () => { st.mode = 'external'; if(nodes.launcherDetails) nodes.launcherDetails.open = true; render(); });
 
-      const header = createEl(d.doc, 'section', { className: 'role-step document-red booth-panel w8-blue-runner', id: 'w8-blue-adapter', 'aria-labelledby': 'w8-blue-title' },
-        createEl(d.doc, 'div', { className: 'step-head w8-blue-runner-head' },
-          createEl(d.doc, 'p', { className: 'booth-lab', textContent: 'BLUE REVIEW' }),
-          createEl(d.doc, 'h2', { id: 'w8-blue-title', className: 'booth-myai-title', tabindex: '-1', textContent: 'BLUE 검수' })),
+      nodes.launcherTitle = createEl(d.doc, 'h2', { id: 'w8-blue-title', className: 'booth-myai-title', tabindex: '-1', textContent: 'BLUE 검수' });
+      nodes.launcherSummary = createEl(d.doc, 'summary', { id: 'w8-blue-launcher-summary', className: 'w8-blue-launcher-summary' },
+        createEl(d.doc, 'span', { className: 'step-head w8-blue-runner-head' },
+          createEl(d.doc, 'span', { className: 'booth-lab', textContent: 'BLUE REVIEW' }),
+          nodes.launcherTitle));
+      nodes.launcherBody = createEl(d.doc, 'div', { id: 'w8-blue-launcher-body', className: 'w8-blue-launcher-body' },
         createEl(d.doc, 'div', { className: 'booth-tabs w8-review-tabs', role: 'group', 'aria-label': 'BLUE 검수 경로' }, nodes.tabHosted, nodes.tabExternal),
         buildHostedPanel(),
         buildExternalPanel(),
         buildPromptDetails());
+      nodes.launcherDetails = createEl(d.doc, 'details', { id: 'w8-blue-launcher-details', className: 'w8-blue-launcher-details' },
+        nodes.launcherSummary,
+        nodes.launcherBody);
+      nodes.launcherDetails.open = true;
+
+      const header = createEl(d.doc, 'section', { className: 'role-step document-red booth-panel w8-blue-runner', id: 'w8-blue-adapter', 'aria-labelledby': 'w8-blue-title' },
+        nodes.launcherDetails);
 
       nodes.resultsSummary = createEl(d.doc, 'p', { id: 'w8-blue-results-summary', className: 'booth-small muted', role: 'status', 'aria-live': 'polite' });
       nodes.runFilterBar = createEl(d.doc, 'div', { id: 'w8-blue-run-filters', className: 'booth-chips w8-blue-filters', role: 'group', 'aria-label': '실행 필터' });
@@ -2326,11 +2339,25 @@
       nodes.runsList = createEl(d.doc, 'div', { id: 'w8-blue-runs-list', className: 'w8-blue-runs-list' });
       nodes.findingsList = createEl(d.doc, 'div', { id: 'w8-blue-findings-list', className: 'hosted-ai-candidates booth-findings' });
       nodes.resultsTitle = createEl(d.doc, 'h2', { id: 'w8-blue-results-title', className: 'w8-blue-results-title', textContent: '항목별 AI 검증 결과' });
+      nodes.resultsHead = createEl(d.doc, 'div', { className: 'step-head w8-blue-results-head' },
+        createEl(d.doc, 'div', {}, nodes.resultsTitle, nodes.resultsSummary));
+
+      nodes.findingsSummary = createEl(d.doc, 'summary', { id: 'w8-blue-findings-summary', className: 'w8-blue-fold-summary', textContent: 'AI 전체 지적 보기' });
+      nodes.findingsDetails = createEl(d.doc, 'details', { id: 'w8-blue-findings-details', className: 'booth-more w8-blue-fold' },
+        nodes.findingsSummary, nodes.findingsList);
+      nodes.findingsDetails.open = false;
+
+      nodes.runsSummary = createEl(d.doc, 'summary', { id: 'w8-blue-runs-summary', className: 'w8-blue-fold-summary', textContent: '실행 상세' });
+      nodes.runsDetails = createEl(d.doc, 'details', { id: 'w8-blue-runs-details', className: 'booth-more w8-blue-fold' },
+        nodes.runsSummary,
+        createEl(d.doc, 'div', { className: 'w8-blue-runs-body' }, nodes.compareWrap, nodes.runsList));
+      nodes.runsDetails.open = false;
 
       const results = createEl(d.doc, 'section', { className: 'role-step document-red booth-panel w8-blue-results-panel', id: 'w8-blue-results', 'aria-labelledby': 'w8-blue-results-title' },
-        createEl(d.doc, 'div', { className: 'step-head w8-blue-results-head' },
-          createEl(d.doc, 'div', {}, nodes.resultsTitle, nodes.resultsSummary)),
-        nodes.runFilterBar, nodes.compareWrap, nodes.findingsList, nodes.runsList);
+        nodes.resultsHead,
+        nodes.runFilterBar,
+        nodes.findingsDetails,
+        nodes.runsDetails);
 
       nodes.bodyGrid = createEl(d.doc, 'div', { id: 'w8-blue-body', className: 'w8-blue-body' }, results, header);
       host.append(buildTicketSection(), nodes.bodyGrid);
@@ -2589,12 +2616,12 @@
 
     function appendRunChoices(allRuns){
       const allBtn = createEl(d.doc, 'button', { type: 'button', className: st.filterRunId === 'all' ? 'booth-chip on' : 'booth-chip', 'aria-pressed': String(st.filterRunId === 'all'), textContent: '전체 실행 (' + allRuns.length + ')' });
-      allBtn.addEventListener('click', () => { st.filterRunId = 'all'; renderResults(); });
+      allBtn.addEventListener('click', () => { st.lastTerminalState = ''; st.filterRunId = 'all'; renderResults(); });
       nodes.runFilterBar.append(allBtn);
       allRuns.forEach((r, i) => {
         const label = '#' + (i + 1) + ' ' + (r.detector || 'BLUE') + (cleanModel(r.model) ? ' · ' + cleanModel(r.model) : '') + ' (' + r.findings.length + ')';
         const btn = createEl(d.doc, 'button', { type: 'button', className: st.filterRunId === r.id ? 'booth-chip on' : 'booth-chip', 'aria-pressed': String(st.filterRunId === r.id), textContent: label });
-        btn.addEventListener('click', () => { st.filterRunId = r.id; renderResults(); });
+        btn.addEventListener('click', () => { st.lastTerminalState = ''; st.filterRunId = r.id; renderResults(); });
         nodes.runFilterBar.append(btn);
       });
     }
@@ -2612,7 +2639,19 @@
         st.filterUnmatchedOnly = false;
       }
     }
-    function renderVisibleFindings(visiblePairs, segments){
+    function collectOpenDetails(container, keyFn){
+      const openKeys = new Set();
+      if(!container || !container.children) return openKeys;
+      for(const child of container.children){
+        if(!child || typeof child.querySelector !== 'function') continue;
+        if(child.querySelector('details')?.open){
+          const key = keyFn(child);
+          if(key) openKeys.add(key);
+        }
+      }
+      return openKeys;
+    }
+    function renderVisibleFindings(visiblePairs, segments, openKeys){
       let count = 0;
       for(const { run, runNumber } of visiblePairs){
         if(!run.findings.length){
@@ -2628,12 +2667,19 @@
         run.findings.forEach((f, idx) => {
           if(st.filterUnmatchedOnly && f.pageIndex !== null) return;
           count++;
-          nodes.findingsList.append(buildFindingCard(run, runNumber, f, idx, segments));
+          const card = buildFindingCard(run, runNumber, f, idx, segments);
+          const fid = card.getAttribute('data-finding-id');
+          if(openKeys && openKeys.has(run.id + '|' + fid)){
+            const det = card.querySelector('details');
+            if(det) det.open = true;
+          }
+          nodes.findingsList.append(card);
         });
       }
       if(st.filterUnmatchedOnly && count === 0){
         nodes.findingsList.append(createEl(d.doc, 'p', { className: 'muted', textContent: '선택한 실행에는 위치 미지정 지적이 없습니다.' }));
       }
+      return count;
     }
     function drawTicketBarcode(code){
       const canvas = nodes.ticketBarcode;
@@ -2763,7 +2809,7 @@
         : allRuns.length - 1;
       const run = allRuns[focusIdx];
       const runNumber = focusIdx + 1;
-      const grading = readGradingSummary(d.ls, st.artifact?.sha256, run.id);
+      const grading = root.FalsifyW8Grading?.summary(run, d.ls);
       const view = summarizeRunTicket(run, runNumber, grading);
       const unmatched = run.findings.filter(f => f.pageIndex === null).length;
       nodes.ticketSection.hidden = false;
@@ -2772,8 +2818,8 @@
       nodes.ticketCode.textContent = '#' + runNumber;
       nodes.ticketDetector.textContent = [run.detector || 'BLUE', cleanModel(run.model)].filter(Boolean).join(' · ');
       nodes.ticketPaper.textContent = shortPaperTitle(st.artifact?.name || run.fileName || '현재 논문');
-      nodes.ticketMetricLabel.textContent = '지적';
-      nodes.ticketMetric.textContent = run.findings.length + '건' + (unmatched ? ' (미지정 ' + unmatched + ')' : '');
+      nodes.ticketMetricLabel.textContent = grading ? '심은 결함' : '지적';
+      nodes.ticketMetric.textContent = grading ? grading.total + '곳' : run.findings.length + '건' + (unmatched ? ' (미지정 ' + unmatched + ')' : '');
       nodes.ticketDate.textContent = formatDateDot(Date.parse(run.updatedAt || run.createdAt || '') || d.nowFn());
       nodes.ticketWait.hidden = true;
       nodes.ticketResult.hidden = false;
@@ -2809,22 +2855,53 @@
       stopClock();
       nodes.ticketSection.hidden = true;
     }
-    function renderResults(){
-      clearNode(nodes.runFilterBar); clearNode(nodes.runsList); clearNode(nodes.findingsList);
-      const allRuns = st.artifact ? currentRunsRaw(st.artifact.sha256) : [];
-      nodes.bodyGrid.setAttribute('data-results', allRuns.length ? 'ready' : 'empty');
-      if(!st.artifact){
-        nodes.resultsSummary.textContent = 'PDF를 열면 이 문서의 BLUE 실행과 지적이 여기에 모입니다.';
-        nodes.compareWrap.hidden = true;
-        renderTicket([]);
+    function activeCompletedRun(allRuns){
+      if(!st.artifact || !allRuns.length) return null;
+      const f = hostedViewFlags();
+      if(st.busy === 'submit' || f.activeJob || f.unconfirmedPending) return null;
+      if(st.lastTerminalState === 'failed' || st.lastTerminalState === 'cancelled') return null;
+      const idx = st.filterRunId !== 'all' ? allRuns.findIndex(r => r.id === st.filterRunId) : -1;
+      return idx >= 0 ? allRuns[idx] : allRuns[allRuns.length - 1];
+    }
+    function renderEditResults(run){
+      if(!nodes.editResults) return;
+      const renderCards = root.FalsifyW8Grading?.renderCards;
+      if(!run || typeof renderCards !== 'function'){
+        clearNode(nodes.editResults);
+        nodes.editResults.hidden = true;
         return;
       }
-      renderTicket(allRuns);
-      if(!allRuns.length){
-        nodes.resultsSummary.textContent = '아직 BLUE 실행 기록이 없습니다.';
-        nodes.compareWrap.hidden = true;
-        return;
+      nodes.editResults.hidden = false;
+      renderCards(nodes.editResults, run, d.ls);
+      if(!(nodes.editResults.children && nodes.editResults.children.length > 0) && !nodes.editResults.firstChild){
+        nodes.editResults.hidden = true;
       }
+    }
+    function launcherState(count) {
+      if (!count) return 'empty';
+      const flags = hostedViewFlags();
+      if (st.busy === 'submit' || flags.activeJob || flags.unconfirmedPending) return 'checking';
+      if (['failed', 'cancelled'].includes(st.lastTerminalState)) return 'retry';
+      return 'results';
+    }
+    function syncFoldState(allRuns){
+      const hash = st.artifact?.sha256 || null;
+      const count = allRuns.length;
+      const state = launcherState(count);
+      const attention = st.externalError || st.hostedError || (st.duplicateDraft ? 'duplicate' : '');
+      const changedPaper = hash !== layout.hash;
+      if (changedPaper || !count) {
+        nodes.findingsDetails.open = false;
+        nodes.runsDetails.open = false;
+      }
+      nodes.launcherTitle.textContent = count ? '다시 검수 · 내 AI' : 'BLUE 검수';
+      if (attention && attention !== layout.attention) nodes.launcherDetails.open = true;
+      else if (changedPaper || state !== layout.state || count !== layout.completedRuns) {
+        nodes.launcherDetails.open = state !== 'results' || Boolean(attention);
+      }
+      Object.assign(layout, {hash, state, completedRuns: count, attention});
+    }
+    function renderResultsContent(allRuns, openRunMetaIds, openFindingKeys){
       const totalFindings = allRuns.reduce((sum, r) => sum + r.findings.length, 0);
       const totalUnmatched = allRuns.reduce((sum, r) => sum + r.findings.filter(f => f.pageIndex === null).length, 0);
       const hostedCount = allRuns.filter(r => r.detector === DETECTOR_HOSTED).length;
@@ -2833,8 +2910,54 @@
       renderFilterButtons(allRuns, totalUnmatched);
       renderComparisonTable(allRuns);
       const visiblePairs = allRuns.map((r, i) => ({ run: r, runNumber: i + 1 })).filter(p => st.filterRunId === 'all' || p.run.id === st.filterRunId);
-      for(const { run, runNumber } of visiblePairs) nodes.runsList.append(buildRunCard(run, runNumber));
-      renderVisibleFindings(visiblePairs, st.segmentsByHash.get(st.artifact.sha256)?.segments || []);
+      for(const { run, runNumber } of visiblePairs){
+        const runCard = buildRunCard(run, runNumber);
+        if(openRunMetaIds.has(run.id)){
+          const det = runCard.querySelector('details');
+          if(det) det.open = true;
+        }
+        nodes.runsList.append(runCard);
+      }
+      const visibleFindingCount = renderVisibleFindings(visiblePairs, st.segmentsByHash.get(st.artifact.sha256)?.segments || [], openFindingKeys);
+      if(nodes.findingsSummary){
+        const label = st.filterUnmatchedOnly
+          ? 'AI 전체 지적 보기 (위치 미지정 ' + visibleFindingCount + '건)'
+          : 'AI 전체 지적 보기 (' + visibleFindingCount + '건)';
+        nodes.findingsSummary.textContent = label;
+      }
+      if(nodes.runsSummary){
+        nodes.runsSummary.textContent = allRuns.length > 1
+          ? '실행 상세 · 비교 (' + allRuns.length + '건)'
+          : '실행 상세 · 모델·조건 (1건)';
+      }
+    }
+    function renderResults(){
+      const openRunMetaIds = collectOpenDetails(nodes.runsList, el => el.getAttribute('data-run-id'));
+      const openFindingKeys = collectOpenDetails(nodes.findingsList, el => {
+        const rid = el.getAttribute('data-run-id');
+        const fid = el.getAttribute('data-finding-id');
+        return rid && fid ? rid + '|' + fid : '';
+      });
+      clearNode(nodes.runFilterBar); clearNode(nodes.runsList); clearNode(nodes.findingsList);
+      const allRuns = st.artifact ? currentRunsRaw(st.artifact.sha256) : [];
+      nodes.bodyGrid.setAttribute('data-results', allRuns.length ? 'ready' : 'empty');
+      if(!st.artifact){
+        nodes.resultsSummary.textContent = 'PDF를 열면 이 문서의 BLUE 실행과 지적이 여기에 모입니다.';
+        nodes.compareWrap.hidden = true;
+        renderTicket([]);
+        renderEditResults(null);
+        syncFoldState([]);
+        return;
+      }
+      renderTicket(allRuns);
+      renderEditResults(activeCompletedRun(allRuns));
+      syncFoldState(allRuns);
+      if(!allRuns.length){
+        nodes.resultsSummary.textContent = '아직 BLUE 실행 기록이 없습니다.';
+        nodes.compareWrap.hidden = true;
+        return;
+      }
+      renderResultsContent(allRuns, openRunMetaIds, openFindingKeys);
     }
 
     function render(){

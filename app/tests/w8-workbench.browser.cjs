@@ -329,6 +329,7 @@ async function verifyPaperSync(page, mobile) {
   await reviewRecorded;
   assert.ok(syncCalls.some(c => c.sourceSha256 === paperSha && c.revisionSha256 === revSha && Array.isArray(c.runs) && c.runs.some(r => r.findings.some(f => f.quote === '64' && f.verdict === '아님'))));
   assert.equal(await page.locator('[data-w8-action="submit"]').count(), 0);
+  await page.locator('[data-w8-csv-summary]').click();
   await page.locator('[data-w8-field="participant"]').fill('동기화테스터');
   const csvDownload = page.waitForEvent('download');
   await page.locator('[data-w8-action="download"]').click();
@@ -399,13 +400,12 @@ async function run() {
       const response = {role:'blue', findings:[{id:'f1',quote:'28',rationale:'Compare this height with the reported difference.'}]};
       await page.locator('#w8-blue-external-answer').fill(JSON.stringify(response));
       await page.locator('#w8-blue-external-import').click();
-      await page.locator('#w8-grading summary').first().click();
-      const verdicts = page.locator('#w8-grading select');
+      await page.locator('#w8-blue-edit-results details > summary').first().click();
+      const verdicts = page.locator('#w8-blue-edit-results select');
       await verdicts.first().waitFor();
       assert.equal(await verdicts.count(), 2);
       await verdicts.first().selectOption('detected');
-      await page.locator('#w8-grading details details summary').first().click();
-      await page.locator('#w8-grading input[type=checkbox]').first().check();
+      await page.locator('#w8-blue-edit-results input[type=checkbox]').first().check();
       const other = Buffer.concat([await fs.readFile(source), Buffer.from('\n%Second study\n')]);
       await page.locator('#w8-choose').click();
       assert.ok(await page.locator('#w8-return').isVisible());
@@ -422,9 +422,9 @@ async function run() {
       await page.locator('#w8-review').waitFor();
       assert.equal(hash, await page.evaluate(async () => (await window.FalsifyW8Paper.artifact()).sha256));
       await page.reload();
-      await page.locator('#w8-grading summary').first().click();
+      await page.locator('#w8-blue-edit-results details > summary').first().click();
       assert.equal(await verdicts.first().inputValue(), 'detected');
-      assert.ok(await page.locator('#w8-grading input[type=checkbox]').first().isChecked());
+      assert.ok(await page.locator('#w8-blue-edit-results input[type=checkbox]').first().isChecked());
     }
     await verifyMyAi(page, mobile);
     await verifyArxiv(page, mobile);

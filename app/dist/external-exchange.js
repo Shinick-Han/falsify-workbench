@@ -372,6 +372,7 @@
   }
   function populateBlueItem(item,entry,index,segments,batch){
     copyFindingFields(item,entry);
+    if(['rejected','unresolved'].includes(entry.status || entry.state)) item.status=entry.status || entry.state;
     if(typeof entry.quote==='string'&&entry.quote){item.quote=entry.quote;locate(item,segments,item.quote);}
     if(!item.quote&&!item.rationale&&!item.evidence.length){batch.diagnostics.push({code:'malformed-item',index,message:'내용이 없는 지적입니다.'});return false;}
     return true;

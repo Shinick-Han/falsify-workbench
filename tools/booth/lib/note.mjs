@@ -1,19 +1,12 @@
+import matcher from '../../../app/dist/w8-matcher.js';
 import { DEFAULT_NOTES } from './config.mjs';
 import { findingPageIndexes, physicalPage } from './findings.mjs';
+
+export const { clip, splitRationale } = matcher;
 
 export const NOTE_MAX = 1000;
 const QUOTE_MAX = 200;
 const RATIONALE_MAX = 300;
-
-function squash(value) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim();
-}
-
-export function clip(value, max) {
-  const text = squash(value);
-  if (text.length <= max) return text;
-  return `${text.slice(0, max - 1).trimEnd()}…`;
-}
 
 // The finding's own page, else the first page its evidence cites. 1-based, '' when unknown.
 export function notePage(finding) {
@@ -21,16 +14,6 @@ export function notePage(finding) {
   if (own !== '') return own;
   const pages = [...findingPageIndexes(finding)].sort((a, b) => a - b);
   return pages.length ? pages[0] + 1 : '';
-}
-
-// BLUE writes "<Korean> || EN: <English>" in its one rationale field (the runtime schema has no second field).
-const EN_MARK = /\s*\|\|\s*EN:\s*/i;
-
-export function splitRationale(value) {
-  const text = squash(value);
-  const at = text.search(EN_MARK);
-  if (at < 0) return { ko: text, en: '' };
-  return { ko: text.slice(0, at), en: text.slice(at).replace(EN_MARK, '') };
 }
 
 function fill(template, values) {

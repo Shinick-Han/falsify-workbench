@@ -409,7 +409,6 @@
     window.FalsifyW8RedKey?.mount(byId('w8-red-key-export'), {
       paper, onError: () => { status.textContent = '정답지 CSV를 다운로드하지 못했어요. 다시 눌러 주세요.'; }
     });
-    window.FalsifyW8Grading.mount(byId('w8-grading'), () => blue.runs());
     window.FalsifyW8Csv.mount(byId('w8-csv'), {
       runs: () => blue.runs()
     });

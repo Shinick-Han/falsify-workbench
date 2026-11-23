@@ -11,7 +11,7 @@ const shell = read('workbench-shell.html')
   .replace('{{PAPER_SEARCH_API}}', paperApi)
   .replace('{{TEAM_API}}', teamApi);
 const index = read('../app/dist/index.html');
-const assets = ['booth-edits', 'booth', 'booth-recipe', 'booth-myai', 'booth-pageedit', 'w8-paper', 'w8-paper-links', 'w8-blue', 'w8-csv', 'w8-red-key', 'w8-team', 'w8-paper-sync', 'w8-library', 'w8-history', 'w8-grading', 'w8-workbench'];
+const assets = ['booth-edits', 'booth', 'booth-recipe', 'booth-myai', 'booth-pageedit', 'w8-paper', 'w8-paper-links', 'w8-matcher', 'w8-blue', 'w8-csv', 'w8-red-key', 'w8-team', 'w8-paper-sync', 'w8-library', 'w8-history', 'w8-grading', 'w8-workbench'];
 function assetUrl(file) {
   const version = createHash('sha256').update(read('../app/dist/' + file)).digest('hex').slice(0, 12);
   return file + '?v=' + version;

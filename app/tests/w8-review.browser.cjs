@@ -44,6 +44,8 @@ async function check() {
     await page.locator('#w8-blue-external-answer').fill(answer);
     await page.locator('#w8-blue-external-import').click();
     await page.waitForFunction(() => window.FalsifyW8Blue.runs().some(r => r.findings.length === 5));
+    assert.equal(await page.locator('#w8-blue-hosted-run').isVisible(),false);
+    await page.locator('#w8-blue-launcher-summary').click();
     await page.locator('#w8-blue-tab-hosted').click();
     await page.locator('#w8-blue-hosted-run').click();
     await page.waitForFunction(() => window.FalsifyW8Blue.runs().filter(r => r.findings.length === 5).length === 2);
@@ -52,6 +54,8 @@ async function check() {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].role, 'blue');
     assert.ok(Object.keys(calls[0]).every(k => ['role','prompt','uploadId','idempotencyKey','model','effort','useEvidence','budget','harness'].includes(k)));
+    assert.equal(await page.locator('[data-w8-field="participant"]').isVisible(),false);
+    await page.locator('[data-w8-csv-summary]').click();
     await page.locator('[data-w8-field="participant"]').fill('테스트');
     const started = page.waitForEvent('download');
     await page.locator('[data-w8-action="download"]').click();
@@ -64,8 +68,10 @@ async function check() {
     const rows = await page.evaluate(() => FalsifyW8Blue.runs().map(r => r.findings.length));
     assert.deepEqual(rows, [5,5]);
     await page.reload();
+    await page.locator('#w8-blue-findings-summary').click();
     await page.locator('#w8-blue-findings-list article').first().waitFor();
     assert.equal(await page.locator('#w8-blue-findings-list article').count(), 10);
+    await page.locator('#w8-blue-launcher-summary').click();
     await page.locator('#w8-blue-tab-external').click();
     await page.locator('#w8-blue-external-answer').fill(answer);
     await page.locator('#w8-blue-external-import').click();
