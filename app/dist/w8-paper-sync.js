@@ -17,6 +17,14 @@
   const DEFAULT_RETRY_DELAY_MS = 2000;
   const MAX_AUTO_RETRIES = 2;
   const UNKNOWN_MODELS = new Set(['manual-model-unverified', 'unknown', '미확인', '모델 미상']);
+  const ORIGIN_DETECTORS = Object.freeze({
+    hosted: '내장 BLUE',
+    external: '외부 AI',
+    'external-ai-import': '외부 AI',
+    'manual-unverified': '외부 AI',
+    'imported-unverified': '외부 AI',
+    'local-codex': '로컬 BLUE',
+  });
   const SYNC_ERROR_COPY = {
     not_configured: 'Confluence 자동 동기화 서버가 아직 설정되지 않았어요.',
     permission_denied: '이 Atlassian 계정에 Falsify Confluence 쓰기 권한이 없어요.',
@@ -117,18 +125,46 @@
     return true;
   }
 
-  function firstBatchModel(run) {
+  function firstBatchField(run, key) {
     const batches = run?.snapshot?.batches;
     if (!Array.isArray(batches)) return '';
-    const hit = batches.find(b => isObj(b) && typeof b.model === 'string' && b.model.trim());
-    return hit ? hit.model : '';
+    const hit = batches.find(b => isObj(b) && typeof b[key] === 'string' && b[key].trim());
+    return hit ? hit[key] : '';
   }
 
   function resolveModel(run) {
-    const candidates = [run?.model, run?.response?.model, run?.result?.model, run?.harness?.adapter?.model, firstBatchModel(run)];
+    const candidates = [run?.model, run?.response?.model, run?.result?.model, run?.harness?.adapter?.model, firstBatchField(run, 'model')];
     for (const candidate of candidates) {
       const value = cleanStr(candidate, false, 200);
       if (value && !UNKNOWN_MODELS.has(value.toLowerCase()) && !UNKNOWN_MODELS.has(value)) return value;
+    }
+    return '';
+  }
+
+  function resolveDetector(run) {
+    const harnessName = cleanStr(run?.harness?.name, false, 80);
+    const harnessVer = cleanStr(run?.harness?.version, false, 32);
+    const harnessLabel = harnessName ? (harnessVer ? `${harnessName} v${harnessVer}` : harnessName) : '';
+    const originKey = cleanStr(run?.source ?? run?.provenance ?? run?.sourceKind, false, 64).toLowerCase();
+    const candidates = [run?.detector, run?.profile, harnessLabel, ORIGIN_DETECTORS[originKey]];
+    for (const candidate of candidates) {
+      const value = cleanStr(candidate, false, 128);
+      if (value) return value;
+    }
+    return '';
+  }
+
+  function resolveCondition(run) {
+    const candidates = [
+      run?.condition,
+      run?.promptCondition,
+      run?.promptVersion,
+      firstBatchField(run, 'condition'),
+      firstBatchField(run, 'prompt'),
+    ];
+    for (const candidate of candidates) {
+      const value = cleanStr(candidate, false, 160);
+      if (value) return value;
     }
     return '';
   }
@@ -201,6 +237,8 @@
     const findings = extractRawFindings(run).map(sanitizeFinding).filter(Boolean);
     const entry = { id, revisionSha256: rev.revisionSha256, findings };
     setIfPresent(entry, 'model', resolveModel(run));
+    setIfPresent(entry, 'detector', resolveDetector(run));
+    setIfPresent(entry, 'condition', resolveCondition(run));
     setIfPresent(entry, 'createdAt', resolveCreatedAt(run));
     return entry;
   }

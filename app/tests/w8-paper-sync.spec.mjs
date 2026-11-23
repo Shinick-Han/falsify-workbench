@@ -502,6 +502,7 @@ test('user-gesture Confluence 연결 + auto-sync on open, revision edit, native 
       id: 'hosted-job-1',
       revisionSha256: REV_A,
       model: 'claude-sonnet-5-5',
+      detector: '내장 BLUE',
       findings: [{ id: 'F1', quote: '28 cm', rationale: 'Differs from table', severity: '높음', verdict: '아님' }],
     }]);
 
@@ -873,11 +874,53 @@ test('mixed source and revision projectRuns preserve per-run revisionSha256 and 
     assert.equal(mixedBody.runs[1].findings[0].page, 3);
 
     assert.equal(merged.runs.length, 2, 'server merge keeps source and revision runs distinct');
-    assert.ok(merged.runs.some(r => r.id === 'shared-run-id' && r.revisionSha256 === null && r.findings[0].page === 1));
-    assert.ok(merged.runs.some(r => r.id === 'shared-run-id' && r.revisionSha256 === REV_A && r.findings[0].page === 3));
+    assert.ok(merged.runs.some(r => r.id === 'shared-run-id' && r.revisionSha256 === null && r.detector === '내장 BLUE' && r.condition === 'P0' && r.findings[0].page === 1));
+    assert.ok(merged.runs.some(r => r.id === 'shared-run-id' && r.revisionSha256 === REV_A && r.detector === '내 AI' && r.condition === '공통 프롬프트 v6' && r.findings[0].page === 3));
   } finally {
     h.cleanup();
   }
+});
+
+test('bounded auto-retries stop at 2 on persistent transient failure, drop wrong/missing revision runs, without stripping detector metadata', async () => {
+  let putCount = 0;
+  const h = createHarness({
+    retryDelayMs: 10,
+    routes(method, reqPath, init, fullUrl, fallback) {
+      if (method === 'PUT' && reqPath === '/v1/w8/paper-sync') {
+        putCount += 1;
+        return { status: 503, body: { error: { code: 'upstream_unavailable' } } };
+      }
+      return fallback(method, reqPath, init, fullUrl);
+    },
+  });
+  try {
+    await h.sync.ready;
+    await h.sync.connect();
+    const validRun = { id: 'run-ok', fileHash: REV_A, detector: '내장 BLUE', condition: 'A', model: 'gemini-4-neon-high', findings: [] };
+    const wrongRevRun = { id: 'run-wrong', fileHash: REV_B, detector: '내장 BLUE', condition: 'A', findings: [] };
+    const badRevRun = { id: 'run-bad-rev', revisionSha256: 'not-a-sha', detector: '내장 BLUE', condition: 'A', findings: [] };
+    const built = JSON.parse(JSON.stringify(h.SyncApi.buildPayload({
+      sourceSha256: SHA_A,
+      title: 'Bounded Retry Paper',
+      revisionSha256: REV_A,
+      runs: [validRun, wrongRevRun, badRevRun],
+    })));
+    assert.deepEqual(built.runs.map(r => r.id), ['run-ok'], 'wrong/malformed revision runs excluded');
+    assert.equal(built.runs[0].detector, '내장 BLUE');
+    assert.equal(built.runs[0].condition, 'A');
+
+    h.paper.setPaper({ ready: true, sourceSha256: SHA_A, name: 'Retry.pdf', hasEdits: false });
+    h.sync.show({ sourceSha256: SHA_A, title: 'Retry.pdf', opened: true });
+    await until(() => putCount === 3, '1 initial attempt + 2 bounded retries');
+    await new Promise(r => setTimeout(r, 60));
+    assert.equal(putCount, 3, 'stops after 2 bounded auto-retries');
+    assert.equal(h.nodes['w8-sync-retry'].hidden, false);
+    assert.equal(h.nodes['w8-sync-retry'].disabled, false);
+  } finally {
+    h.cleanup();
+  }
+
+
 });
 
 test('delayed Drive link availability event refreshes synced paper with sourceDriveId/revisionDriveId without retro-publishing', async () => {

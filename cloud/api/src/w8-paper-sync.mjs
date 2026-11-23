@@ -16,6 +16,7 @@ import { canonicalJson, sha256HexBytes, sha256HexText } from './w8-archive.mjs';
 
 export const W8_DEFAULT_LIBRARY_PARENT_ID = '20512769';
 export const W8_PAPER_SYNC_SCHEMA = 'falsify.w8-paper-sync.v1';
+export const W8_ROUND_GRADES_SCHEMA = 'falsify.w8-round-grades.v1';
 export const W8_PAPER_SYNC_KIND = 'w8-paper-sync';
 export const W8_PAPER_SYNC_LABEL = 'falsify-w8-paper-sync';
 export const W8_PAPER_SYNC_PROPERTY_KEY = 'falsify-w8-paper-sync';
@@ -63,8 +64,10 @@ const FORBIDDEN_TEXT_PATTERNS = [
 ];
 
 const TOP_KEYS = ['sourceSha256', 'title', 'arxivId', 'revisionSha256', 'sourceDriveId', 'revisionDriveId', 'runs'];
-const RUN_KEYS = ['id', 'model', 'findings', 'revisionSha256', 'createdAt'];
+const RUN_KEYS = ['id', 'model', 'detector', 'condition', 'findings', 'revisionSha256', 'createdAt'];
 const FINDING_KEYS = ['quote', 'rationale', 'severity', 'verdict', 'verdictLabel', 'id', 'page', 'locationLabel', 'findingType', 'confidence'];
+const UNCLASSIFIED_LABEL = '미분류';
+const VALID_GRADE_STATUSES = new Set(['detected', 'partial', 'missed']);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -244,6 +247,8 @@ function normalizeRun(raw, defaultRevision) {
   assertAllowedKeys(raw, RUN_KEYS);
   const id = normalizeText(raw.id, { required: true, maxLen: MAX_ID_CHARS });
   const model = normalizeText(raw.model, { maxLen: MAX_ID_CHARS });
+  const detector = normalizeText(raw.detector, { maxLen: MAX_SHORT_FIELD_CHARS });
+  const condition = normalizeText(raw.condition, { maxLen: 160 });
   const revisionSha256 = raw.revisionSha256 !== undefined
     ? normalizeHex64(raw.revisionSha256, false)
     : defaultRevision;
@@ -255,6 +260,8 @@ function normalizeRun(raw, defaultRevision) {
   return {
     id,
     model,
+    ...(detector ? { detector } : {}),
+    ...(condition ? { condition } : {}),
     revisionSha256,
     ...(createdAt ? { createdAt } : {}),
     findings,
@@ -403,12 +410,16 @@ function mergeRuns(state, payload, contributor) {
     const rev = effectiveRevision(incoming.revisionSha256, payload.sourceSha256);
     const key = runStorageKey(contributor.key, rev, incoming.id);
     const prev = byKey.get(key);
+    const detector = incoming.detector || prev?.detector || '';
+    const condition = incoming.condition || prev?.condition || '';
     const next = {
       key,
       id: incoming.id,
       contributor: contributor.key,
       revisionSha256: rev,
       model: incoming.model || prev?.model || '',
+      ...(detector ? { detector } : {}),
+      ...(condition ? { condition } : {}),
       ...(incoming.createdAt || prev?.createdAt ? { createdAt: prev?.createdAt || incoming.createdAt } : {}),
       findings: mergeFindings(prev?.findings || [], incoming.findings),
     };
@@ -531,9 +542,14 @@ function renderRunsHtml(state, stateSha256, budgetBytes) {
   for (const run of state.runs) {
     const label = state.contributors[run.contributor]?.label || run.contributor;
     const revText = run.revisionSha256 ? `revision <code>${esc(run.revisionSha256.slice(0, 12))}</code>` : 'source';
+    const metaParts = [`Contributor: ${esc(label)}`];
+    if (run.detector) metaParts.push(`Detector: ${esc(run.detector)}`);
+    metaParts.push(`Model: ${esc(run.model || 'unspecified')}`);
+    if (run.condition) metaParts.push(`Condition: ${esc(run.condition)}`);
+    metaParts.push(`Target: ${revText}`, `Findings: ${run.findings.length}`);
     const header =
       `<h3>Run <code>${esc(run.id)}</code></h3>` +
-      `<p>Contributor: ${esc(label)} · Model: ${esc(run.model || 'unspecified')} · Target: ${revText} · Findings: ${run.findings.length}</p>`;
+      `<p>${metaParts.join(' · ')}</p>`;
     const tableHead = `<table><thead><tr><th>Severity</th><th>Verdict</th><th>Quote</th><th>Rationale</th></tr></thead><tbody>`;
     const tableFoot = `</tbody></table>`;
     const rows = run.findings.map(renderFindingRow).join('');
@@ -1130,6 +1146,233 @@ async function readListedPaper(ctx, session, base, parentPageId, child) {
   };
 }
 
+const STUDY_CONDITION_ORDER = Object.freeze(['A', 'B', 'C', UNCLASSIFIED_LABEL]);
+
+export function extractStudyConditionGroup(value) {
+  if (typeof value !== 'string') return UNCLASSIFIED_LABEL;
+  const trimmed = value.normalize('NFC').trim();
+  if (!trimmed) return UNCLASSIFIED_LABEL;
+  const match = /^(?:W8[-_\s]*)?([ABC])(?:\b|[\s(·:_-]|$)/i.exec(trimmed);
+  return match ? match[1].toUpperCase() : UNCLASSIFIED_LABEL;
+}
+
+function cleanOptionalText(value, maxLen = MAX_SHORT_FIELD_CHARS, multiline = false) {
+  if (typeof value !== 'string') return '';
+  const norm = value.normalize('NFC').replace(/\u0000/g, '').trim();
+  const cleaned = multiline
+    ? norm.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+    : norm.replace(/[\u0000-\u001f\u007f]/g, ' ');
+  if (!cleaned || containsForbiddenText(cleaned)) return '';
+  return maxLen && cleaned.length > maxLen ? cleaned.slice(0, maxLen).trim() : cleaned;
+}
+
+function normalizeOptionalHex(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().toLowerCase();
+  return HEX64.test(trimmed) ? trimmed : null;
+}
+
+function dedupeRunsByRevisionAndId(runs) {
+  const byKey = new Map();
+  if (!Array.isArray(runs)) return [];
+  for (const run of runs) {
+    if (!run || typeof run !== 'object') continue;
+    const id = cleanOptionalText(run.id, MAX_ID_CHARS);
+    if (!id) continue;
+    const rev = normalizeOptionalHex(run.revisionSha256);
+    const key = `${rev || 'source'}::${id}`;
+    const prev = byKey.get(key);
+    const findings = Array.isArray(run.findings) ? run.findings.filter(f => f && typeof f === 'object') : [];
+    const detector = cleanOptionalText(run.detector, MAX_SHORT_FIELD_CHARS);
+    const model = cleanOptionalText(run.model, MAX_ID_CHARS);
+    const condition = cleanOptionalText(run.condition, 160);
+    if (!prev) {
+      byKey.set(key, {
+        id,
+        revisionSha256: rev,
+        detector,
+        model,
+        condition,
+        findings: mergeFindings([], findings),
+      });
+    } else {
+      prev.detector = prev.detector || detector;
+      prev.model = prev.model || model;
+      prev.condition = prev.condition || condition;
+      prev.findings = mergeFindings(prev.findings, findings);
+    }
+  }
+  return [...byKey.values()];
+}
+
+function sortFindingTypeCounts(map) {
+  return [...map.entries()]
+    .sort((a, b) => {
+      if (a[0] === UNCLASSIFIED_LABEL && b[0] !== UNCLASSIFIED_LABEL) return 1;
+      if (b[0] === UNCLASSIFIED_LABEL && a[0] !== UNCLASSIFIED_LABEL) return -1;
+      return b[1] - a[1] || a[0].localeCompare(b[0]);
+    })
+    .map(([type, count]) => ({ type, count }));
+}
+
+function incrementBucket(map, key, findingCount) {
+  const cur = map.get(key) || { runCount: 0, findingCount: 0 };
+  cur.runCount += 1;
+  cur.findingCount += findingCount;
+  map.set(key, cur);
+}
+
+export function summarizeRunsStats(runs) {
+  const deduped = dedupeRunsByRevisionAndId(runs);
+  const typeCounts = new Map();
+  const condCounts = new Map();
+  const detectorCounts = new Map();
+  const revCounts = new Map();
+  let findingCount = 0;
+  let unclassifiedFindingCount = 0;
+  let legacyRunCount = 0;
+
+  for (const run of deduped) {
+    const fCount = run.findings.length;
+    findingCount += fCount;
+    const condGroup = extractStudyConditionGroup(run.condition);
+    const detectorLabel = run.detector || UNCLASSIFIED_LABEL;
+    if (condGroup === UNCLASSIFIED_LABEL || !run.detector) legacyRunCount += 1;
+    incrementBucket(condCounts, condGroup, fCount);
+    incrementBucket(detectorCounts, detectorLabel, fCount);
+    incrementBucket(revCounts, run.revisionSha256 || '', fCount);
+    for (const f of run.findings) {
+      const fType = cleanOptionalText(f.findingType, MAX_SHORT_FIELD_CHARS) || UNCLASSIFIED_LABEL;
+      if (fType === UNCLASSIFIED_LABEL) unclassifiedFindingCount += 1;
+      typeCounts.set(fType, (typeCounts.get(fType) || 0) + 1);
+    }
+  }
+
+  const byCondition = STUDY_CONDITION_ORDER
+    .filter(c => condCounts.has(c))
+    .map(c => ({ condition: c, ...condCounts.get(c) }));
+  const byDetector = [...detectorCounts.entries()]
+    .sort((a, b) => {
+      if (a[0] === UNCLASSIFIED_LABEL && b[0] !== UNCLASSIFIED_LABEL) return 1;
+      if (b[0] === UNCLASSIFIED_LABEL && a[0] !== UNCLASSIFIED_LABEL) return -1;
+      return b[1].runCount - a[1].runCount || a[0].localeCompare(b[0]);
+    })
+    .map(([detector, counts]) => ({ detector, ...counts }));
+  const byRevision = [...revCounts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([rev, counts]) => ({ revisionSha256: rev || null, ...counts }));
+
+  return {
+    runCount: deduped.length,
+    findingCount,
+    byFindingType: sortFindingTypeCounts(typeCounts),
+    byCondition,
+    byDetector,
+    byRevision,
+    unclassifiedFindingCount,
+    legacyRunCount,
+  };
+}
+
+export function validateRoundGradesPayload(raw) {
+  if (!isPlain(raw) || raw.schema !== W8_ROUND_GRADES_SCHEMA || raw.published !== true) return null;
+  assertCleanCarrier(raw);
+  const revisionSha256 = normalizeOptionalHex(raw.revisionSha256);
+  if (!revisionSha256 || !Array.isArray(raw.defects) || !Array.isArray(raw.grades)) return null;
+  const defects = new Map();
+  for (const item of raw.defects) {
+    const defectId = cleanOptionalText(item?.defectId, MAX_ID_CHARS);
+    if (!defectId || defects.has(defectId)) return null;
+    defects.set(defectId, {
+      defectId,
+      findingType: cleanOptionalText(item.findingType) || UNCLASSIFIED_LABEL,
+      label: cleanOptionalText(item.label, 240),
+    });
+  }
+  if (!defects.size) return null;
+  return { revisionSha256, defects, grades: raw.grades, roundId: cleanOptionalText(raw.roundId, 120) };
+}
+
+function matchPublishedGrades(round, runs) {
+  const eligible = new Map(runs.filter(run => run.revisionSha256 === round.revisionSha256).map(run => [run.id, run]));
+  const byRun = new Map();
+  for (const grade of round.grades) {
+    const run = eligible.get(grade?.runId);
+    if (!run || grade.revisionSha256 !== round.revisionSha256 || !round.defects.has(grade.defectId)) continue;
+    const recorded = extractStudyConditionGroup(run.condition);
+    const declared = extractStudyConditionGroup(grade.condition);
+    const condition = recorded === UNCLASSIFIED_LABEL ? declared : recorded;
+    if (condition === UNCLASSIFIED_LABEL || (declared !== UNCLASSIFIED_LABEL && declared !== condition)) continue;
+    if (!byRun.has(run.id)) byRun.set(run.id, { run, condition, grades: new Map(), conflict: false });
+    const entry = byRun.get(run.id);
+    const previous = entry.grades.get(grade.defectId);
+    if (entry.condition !== condition || (previous && previous.status !== grade.status)) entry.conflict = true;
+    entry.grades.set(grade.defectId, grade);
+  }
+  return [...byRun.values()].filter(entry => !entry.conflict && entry.grades.size === round.defects.size
+    && [...entry.grades.values()].every(grade => VALID_GRADE_STATUSES.has(grade.status)));
+}
+
+function conditionRecall(entries, plantedCount, condition) {
+  const counts = { detected: 0, partial: 0, missed: 0 };
+  const runs = entries.filter(entry => entry.condition === condition);
+  if (!runs.length) return null;
+  for (const entry of runs) {
+    for (const grade of entry.grades.values()) counts[grade.status]++;
+  }
+  const recall = (counts.detected + counts.partial * 0.5) / (runs.length * plantedCount);
+  return { condition, runCount: runs.length, plantedCount, ...counts, recallPercent: Math.round(recall * 1000) / 10 };
+}
+
+function missedEvidence({ run, condition }, grade) {
+  const finding = run.findings.find(item => Array.isArray(grade.findingIds) && grade.findingIds.includes(item.id));
+  return {
+    runId: run.id,
+    condition,
+    detector: run.detector,
+    model: run.model,
+    page: Number.isInteger(finding?.page) ? finding.page : null,
+    locationLabel: cleanOptionalText(finding?.locationLabel),
+    quote: cleanOptionalText(finding?.quote, 800, true),
+    rationale: cleanOptionalText(grade.note || finding?.rationale, 800, true) || (`실행 지적 ${run.findings.length}건에서 미검출`),
+  };
+}
+
+function repeatedMisses(round, entries) {
+  const misses = [];
+  for (const defect of round.defects.values()) {
+    const missed = entries.filter(entry => entry.grades.get(defect.defectId).status === 'missed');
+    if (missed.length < 2) continue;
+    misses.push({
+      ...defect,
+      revisionSha256: round.revisionSha256,
+      missedRunCount: missed.length,
+      runIds: missed.map(entry => entry.run.id),
+      conditions: [...new Set(missed.map(entry => entry.condition))],
+      detectors: [...new Set(missed.map(entry => entry.run.detector).filter(Boolean))],
+      evidence: missed.slice(0, 20).map(entry => missedEvidence(entry, entry.grades.get(defect.defectId))),
+    });
+  }
+  return misses;
+}
+
+export function analyzeTeamRecord({ runs = [], roundGrades = null } = {}) {
+  const stats = summarizeRunsStats(runs);
+  if (!roundGrades) return { stats, round: null };
+  const entries = matchPublishedGrades(roundGrades, dedupeRunsByRevisionAndId(runs));
+  const plantedCount = roundGrades.defects.size;
+  const round = {
+    status: entries.length ? 'ready' : 'unmatched',
+    roundId: roundGrades.roundId,
+    revisionSha256: roundGrades.revisionSha256,
+    plantedCount,
+    scoredRunCount: entries.length,
+    byCondition: ['A', 'B', 'C'].map(condition => conditionRecall(entries, plantedCount, condition)).filter(Boolean),
+    repeatedMisses: repeatedMisses(roundGrades, entries),
+  };
+  return { stats, round };
+}
+
 async function readPaperDetail(ctx, session, cfg, pageId) {
   await confluenceInternal.confine(ctx.fetchImpl, session.accessToken, session.cloudId, cfg.parentPageId);
   const base = confluenceInternal.cloudBase(session.cloudId);
@@ -1147,6 +1390,7 @@ async function readPaperDetail(ctx, session, cfg, pageId) {
   if (!pageUrl) fail(502, 'upstream_invalid');
   const title = resolveDisplayTitle(state.title, prop.title || page.title);
   if (!title) fail(422, 'invalid_archive');
+  const summary = summarizeRunsStats(state.runs);
   return json(200, {
     pageId,
     pageUrl,
@@ -1154,6 +1398,11 @@ async function readPaperDetail(ctx, session, cfg, pageId) {
     sourceSha256: state.sourceSha256,
     arxivId: verifiedArxivId(state),
     sourceDriveId: verifiedSourceDriveId(state),
+    stats: {
+      runCount: summary.runCount,
+      findingCount: summary.findingCount,
+      byFindingType: summary.byFindingType,
+    },
   });
 }
 

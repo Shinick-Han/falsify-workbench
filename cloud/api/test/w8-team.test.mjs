@@ -1014,3 +1014,31 @@ describe('W8 Stage 2 team delivery gateway', { concurrency: false }, () => {
     assert.equal(validated.normalized.runs[0].findings[0].evidence.length, 15);
   });
 });
+
+test('links two Confluence records in one existing Jira issue comment and reuses it on retry', async () => {
+  const { session, env, mock } = await mintW8Session();
+  for (const id of ['9250', '9251']) {
+    mock.state.pages.set(id, {
+      id, title: 'Synthetic round ' + id, spaceId: '65737', parentId: PARENT,
+      labels: new Set(), properties: new Map(),
+    });
+  }
+  const send = async pageId => readRes(await w8Request('/v1/w8/history/jira-link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session}` },
+    body: { issueKey: 'FLS-18', pageId, patternKey: 'type:numerical_mismatch', patternLabel: 'Numerical mismatch' },
+    env, fetchImpl: mock.fetchImpl,
+  }));
+  const first = await send('9250');
+  assert.equal(first.status, 201, first.text);
+  const second = await send('9251');
+  assert.equal(second.status, 200, second.text);
+  assert.equal(second.json.commentId, first.json.commentId);
+  assert.deepEqual(second.json.linkedPageIds, ['9250', '9251']);
+  const retry = await send('9250');
+  assert.equal(retry.status, 200, retry.text);
+  assert.equal(retry.json.alreadyExisted, true);
+  const comments = mock.state.jiraComments.get('FLS-18');
+  assert.equal(comments.length, 1);
+  assert.match(JSON.stringify(comments[0].body), /9250.*9251/);
+});

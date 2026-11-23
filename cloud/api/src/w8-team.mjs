@@ -21,6 +21,7 @@ import {
   normalizeIssueKey,
   participantKeyHash,
   sha256HexBytes,
+  sha256HexText,
   validateW8BlueArchive,
 } from './w8-archive.mjs';
 import { handleW8Papers, handleW8PaperSync } from './w8-paper-sync.mjs';
@@ -41,7 +42,11 @@ const ATTACHMENT_ID = /^(?:att)?[0-9]{1,20}$/;
 const COMMENT_ID = /^[0-9]{1,20}$/;
 const ACCOUNT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
+const FLS_ISSUE_ID = /^FLS-[1-9][0-9]{0,7}$/;
+const UNSAFE_SINGLELINE = /[\u0000-\u001f\u007f]/;
 const REQUIRED_JIRA_PERMS = ['BROWSE_PROJECTS', 'CREATE_ATTACHMENTS', 'ADD_COMMENTS', 'EDIT_OWN_COMMENTS'];
+const REQUIRED_JIRA_COMMENT_PERMS = ['BROWSE_PROJECTS', 'ADD_COMMENTS', 'EDIT_OWN_COMMENTS'];
+const MAX_PATTERN_LINKS = 50;
 // Platform-bounded subrequest caps for Cloudflare Worker execution budgets.
 const MAX_COMMENT_PAGES = 10;
 const MAX_ATTACHMENT_CANDIDATES = 10;
@@ -736,9 +741,298 @@ async function handleCapabilities(ctx) {
   });
 }
 
+export function parseW8PatternMarker(text) {
+  if (typeof text !== 'string') return null;
+  const m = /\[falsify-w8-pattern:v1\s+issue=(FLS-[1-9][0-9]{0,7})\s+pattern=([a-f0-9]{16})\s+pages=([0-9]{1,20}(?:,[0-9]{1,20})*)\]/.exec(text);
+  if (!m) return null;
+  const pageIds = [...new Set(m[3].split(',').filter(id => PAGE_ID.test(id)))];
+  if (!pageIds.length) return null;
+  return {
+    issueKey: m[1],
+    patternHash: m[2],
+    pageIds,
+  };
+}
+
+function patternMarkerLine({ issueKey, patternHash, pageIds }) {
+  return `[falsify-w8-pattern:v1 issue=${issueKey} pattern=${patternHash} pages=${pageIds.join(',')}]`;
+}
+
+function extractPatternLinkEntries(adfNode, out = []) {
+  if (!adfNode || typeof adfNode !== 'object') return out;
+  if (adfNode.type === 'listItem') {
+    const texts = [];
+    let href = null;
+    const walk = node => {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'text' && typeof node.text === 'string') {
+        texts.push(node.text);
+        if (Array.isArray(node.marks)) {
+          for (const mark of node.marks) {
+            if (mark?.type === 'link' && typeof mark.attrs?.href === 'string') {
+              const safe = safeSiteUrl(mark.attrs.href);
+              if (safe && safe.includes('/wiki/')) href = safe;
+            }
+          }
+        }
+      }
+      if (Array.isArray(node.content)) {
+        for (const child of node.content) walk(child);
+      }
+    };
+    walk(adfNode);
+    if (href) {
+      const idMatch = /\/pages\/([0-9]{1,20})(?:[/?#]|$)/.exec(href);
+      if (idMatch) {
+        const line = texts.join('').replace(href, '').replace(/\s+/g, ' ').trim();
+        out.push({ pageId: idMatch[1], pageUrl: href, label: line.replace(/:\s*$/, '').trim() });
+      }
+    }
+    return out;
+  }
+  if (Array.isArray(adfNode.content)) {
+    for (const child of adfNode.content) extractPatternLinkEntries(child, out);
+  }
+  return out;
+}
+
+function buildPatternCommentAdf({ issueKey, patternHash, patternLabel, entries }) {
+  const sortedPageIds = entries.map(e => e.pageId);
+  const marker = patternMarkerLine({ issueKey, patternHash, pageIds: sortedPageIds });
+  const bullets = entries.map(entry => {
+    const prefix = entry.label ? `${entry.label}: ` : `Confluence 기록 (${entry.pageId}): `;
+    return linkBullet(prefix, entry.pageUrl);
+  });
+  return {
+    version: 1,
+    type: 'doc',
+    content: [
+      {
+        type: 'paragraph',
+        content: [{ type: 'text', text: `W8 팀 기록 연결 · ${patternLabel}`, marks: [{ type: 'strong' }] }],
+      },
+      {
+        type: 'bulletList',
+        content: bullets,
+      },
+      { type: 'paragraph', content: [{ type: 'text', text: marker }] },
+    ],
+  };
+}
+
+async function assertJiraCommentPermissions(ctx, session, base, headers, issueKey) {
+  const url = `${base}/rest/api/3/mypermissions?issueKey=${encodeURIComponent(issueKey)}&permissions=${REQUIRED_JIRA_COMMENT_PERMS.join(',')}`;
+  const response = await confluenceInternal.callUpstream(ctx.fetchImpl, url, { headers });
+  checkJiraAuthStatus(response.status, session, 'issue_not_allowed');
+  const payload = await confluenceInternal.readUpstreamJson(response);
+  const perms = payload?.permissions;
+  if (!perms || REQUIRED_JIRA_COMMENT_PERMS.some(key => perms[key]?.havePermission !== true)) {
+    fail(403, 'permission_denied');
+  }
+}
+
+async function assertExistingFlsIssue(ctx, session, base, headers, issueKey) {
+  const url = `${base}/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary`;
+  const response = await confluenceInternal.callUpstream(ctx.fetchImpl, url, { headers });
+  checkJiraAuthStatus(response.status, session, 'not_found');
+  const issue = await confluenceInternal.readUpstreamJson(response);
+  if (!issue || issue.key !== issueKey) fail(502, 'upstream_invalid');
+  return issue;
+}
+
+function matchPatternComment(comments, accountId, issueKey, patternHash) {
+  let matched = null;
+  for (const comment of comments) {
+    if (!comment || !COMMENT_ID.test(String(comment.id)) || comment.author?.accountId !== accountId) continue;
+    const marker = parseW8PatternMarker(extractAdfText(comment.body).join('\n'));
+    if (marker && marker.issueKey === issueKey && marker.patternHash === patternHash) {
+      matched = { id: String(comment.id), marker, body: comment.body };
+    }
+  }
+  return matched;
+}
+
+async function listPatternComment(ctx, session, issueKey, accountId, patternHash) {
+  const base = jiraBase(session.cloudId);
+  const headers = confluenceInternal.authHeaders(session.accessToken);
+  let startAt = 0;
+  let found = null;
+  for (let page = 0; page < MAX_COMMENT_PAGES; page++) {
+    const response = await confluenceInternal.callUpstream(
+      ctx.fetchImpl,
+      `${base}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?startAt=${startAt}&maxResults=100`,
+      { headers },
+    );
+    const payload = await confluenceInternal.readUpstreamJson(response);
+    const comments = Array.isArray(payload?.comments) ? payload.comments : null;
+    if (!comments) fail(502, 'upstream_invalid');
+    const pageMatch = matchPatternComment(comments, accountId, issueKey, patternHash);
+    if (pageMatch) found = pageMatch;
+    startAt += comments.length;
+    const total = Number(payload.total);
+    if (!comments.length || !Number.isFinite(total) || startAt >= total) break;
+  }
+  return found;
+}
+
+function cleanPatternText(value, maxLen, required = false) {
+  if (value === undefined || value === null) {
+    if (required) fail(400, 'invalid_request');
+    return '';
+  }
+  if (typeof value !== 'string') fail(400, 'invalid_request');
+  const norm = value.normalize('NFC').trim();
+  if (required && !norm) fail(400, 'invalid_request');
+  if (!norm) return '';
+  if (norm.includes('%PDF-')) fail(422, 'forbidden_content');
+  if (UNSAFE_SINGLELINE.test(norm) || norm.length > maxLen) fail(400, 'invalid_request');
+  return norm;
+}
+
+function validateHistoryJiraLinkBody(body) {
+  const allowed = ['issueKey', 'pageId', 'patternKey', 'patternLabel', 'summary', 'revisionSha256'];
+  const required = ['issueKey', 'pageId', 'patternKey'];
+  if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'invalid_request');
+  if (Object.keys(body).some(k => !allowed.includes(k)) || required.some(k => !Object.hasOwn(body, k))) {
+    fail(400, 'invalid_request');
+  }
+  let issueKey;
+  try { issueKey = normalizeIssueKey(body.issueKey); } catch { fail(400, 'invalid_request'); }
+  if (!FLS_ISSUE_ID.test(issueKey)) fail(403, 'issue_not_allowed');
+  const pageId = typeof body.pageId === 'string' ? body.pageId.trim() : '';
+  if (!PAGE_ID.test(pageId)) fail(400, 'invalid_request');
+  const patternKey = cleanPatternText(body.patternKey, 160, true);
+  const patternLabel = cleanPatternText(body.patternLabel, 240, false) || patternKey;
+  const summary = cleanPatternText(body.summary, 400, false);
+  const revisionSha256 = body.revisionSha256 === undefined || body.revisionSha256 === null || body.revisionSha256 === ''
+    ? null
+    : (typeof body.revisionSha256 === 'string' && HEX64.test(body.revisionSha256.trim().toLowerCase())
+      ? body.revisionSha256.trim().toLowerCase()
+      : fail(400, 'invalid_request'));
+  return { issueKey, pageId, patternKey, patternLabel, summary, revisionSha256 };
+}
+
+function resolveConfluenceTitleForLink(page, pageId) {
+  const props = page?.properties?.results;
+  if (Array.isArray(props)) {
+    const syncProp = props.find(p => p && p.key === 'falsify-w8-paper-sync')?.value;
+    if (typeof syncProp?.title === 'string' && syncProp.title.trim()) return syncProp.title.trim().slice(0, 200);
+    const archProp = props.find(p => p && p.key === 'falsify-w8-archive')?.value;
+    if (typeof archProp?.title === 'string' && archProp.title.trim()) return archProp.title.trim().slice(0, 200);
+  }
+  return typeof page?.title === 'string' && page.title.trim() ? page.title.trim().slice(0, 200) : `Confluence ${pageId}`;
+}
+
+function formatPatternLinkLabel(pageTitle, revisionSha256, summary) {
+  const parts = [pageTitle];
+  if (revisionSha256) parts.push(`수정본 ${revisionSha256.slice(0, 12)}`);
+  if (summary) parts.push(summary);
+  return parts.join(' · ').slice(0, 500);
+}
+
+function mergePatternEntries(existingComment, currentEntry) {
+  const byPage = new Map();
+  if (existingComment) {
+    const extracted = extractPatternLinkEntries(existingComment.body);
+    for (const item of extracted) {
+      if (PAGE_ID.test(item.pageId) && !byPage.has(item.pageId)) {
+        byPage.set(item.pageId, item);
+      }
+    }
+    for (const pid of existingComment.marker.pageIds) {
+      if (!byPage.has(pid)) {
+        byPage.set(pid, {
+          pageId: pid,
+          pageUrl: `${SITE_URL}/wiki/spaces/${SPACE_KEY}/pages/${pid}`,
+          label: `Confluence 기록 (${pid})`,
+        });
+      }
+    }
+  }
+  const hadPage = byPage.has(currentEntry.pageId);
+  const prev = byPage.get(currentEntry.pageId);
+  if (!hadPage && byPage.size >= MAX_PATTERN_LINKS) fail(413, 'payload_too_large');
+  byPage.set(currentEntry.pageId, currentEntry);
+  const unchanged = hadPage && prev && prev.pageUrl === currentEntry.pageUrl && prev.label === currentEntry.label;
+  return { entries: [...byPage.values()], unchanged };
+}
+
+async function handleHistoryJiraLink(ctx, session) {
+  const cfg = await requireW8Ready(ctx);
+  const rawBody = await confluenceInternal.readRequestJson(ctx.request, 65536, ctx.budget.signal);
+  const input = validateHistoryJiraLinkBody(rawBody);
+
+  const resource = await confluenceInternal.accessibleResource(ctx.fetchImpl, session.accessToken);
+  if (resource.id !== session.cloudId) fail(403, 'site_not_allowed');
+  assertJiraScopes(session, resource.scopes);
+
+  const confBase = confluenceInternal.cloudBase(session.cloudId);
+  const page = await confluenceInternal.getPage(ctx.fetchImpl, confBase, session.accessToken, input.pageId);
+  if (!page || String(page.spaceId) !== SPACE_ID || (page.status !== undefined && page.status !== 'current')) {
+    fail(404, 'not_found');
+  }
+  await confluenceInternal.assertReadOpen(ctx.fetchImpl, confBase, session.accessToken, input.pageId);
+  const pageUrl = confluenceInternal.webUrl(page) || `${SITE_URL}/wiki/spaces/${SPACE_KEY}/pages/${input.pageId}`;
+  const pageTitle = resolveConfluenceTitleForLink(page, input.pageId);
+
+  const jBase = jiraBase(session.cloudId);
+  const headers = confluenceInternal.authHeaders(session.accessToken);
+  const accountId = await fetchJiraAccountId(ctx, session, jBase, headers);
+  await assertJiraCommentPermissions(ctx, session, jBase, headers, input.issueKey);
+  await assertExistingFlsIssue(ctx, session, jBase, headers, input.issueKey);
+
+  const patternHash = (await sha256HexText(`falsify-w8-pattern:${input.patternKey.toLowerCase()}`)).slice(0, 16);
+  const existingComment = await listPatternComment(ctx, session, input.issueKey, accountId, patternHash);
+  const currentEntry = {
+    pageId: input.pageId,
+    pageUrl,
+    label: formatPatternLinkLabel(pageTitle, input.revisionSha256, input.summary),
+  };
+  const { entries, unchanged } = mergePatternEntries(existingComment, currentEntry);
+  const linkedPageIds = entries.map(e => e.pageId);
+  const progress = {
+    pageId: input.pageId,
+    pageUrl,
+    commentId: existingComment?.id || null,
+  };
+  ctx.budget.pageId = input.pageId;
+  ctx.budget.progress = progress;
+
+  let commentResult;
+  if (existingComment && unchanged) {
+    commentResult = { commentId: existingComment.id, reused: true, updated: false };
+  } else {
+    const adfBody = buildPatternCommentAdf({
+      issueKey: input.issueKey,
+      patternHash,
+      patternLabel: input.patternLabel,
+      entries,
+    });
+    commentResult = existingComment
+      ? await updateExistingComment(ctx, session, input.issueKey, existingComment.id, adfBody, progress)
+      : await createNewComment(ctx, session, input.issueKey, adfBody, progress);
+  }
+
+  const alreadyExisted = commentResult.reused && !commentResult.updated;
+  return json(commentResult.reused ? 200 : 201, {
+    linked: true,
+    issueKey: input.issueKey,
+    issueUrl: issueBrowseUrl(input.issueKey, commentResult.commentId),
+    commentId: commentResult.commentId,
+    pageId: input.pageId,
+    pageUrl,
+    patternHash,
+    linkedPageIds,
+    reused: commentResult.reused,
+    updated: commentResult.updated,
+    alreadyExisted,
+    spaceKey: cfg.spaceKey,
+  });
+}
+
 async function handleAuthStart(ctx) {
   await requireW8Ready(ctx);
-  return startAtlassianAuth(ctx, { extraScopes: W8_JIRA_SCOPES, scopeProfile: W8_SCOPE_PROFILE });
+  return startAtlassianAuth(ctx, { extraScopes: [...W8_JIRA_SCOPES, 'read:confluence-user'], scopeProfile: W8_SCOPE_PROFILE });
 }
 
 async function handleAuthRefresh(ctx, session) {
@@ -947,6 +1241,7 @@ const ROUTES = {
     extraScopes: ['read:confluence-user', 'read:jira-work'], scopeProfile: 'w8-history',
   }) },
   '/v1/w8/history/jira': { GET: async ctx => handleJiraHistory(ctx, await confluenceInternal.bearerSession(ctx)) },
+  '/v1/w8/history/jira-link': { POST: async ctx => handleHistoryJiraLink(ctx, await confluenceInternal.bearerSession(ctx)) },
   '/v1/w8/history/confluence': { GET: async ctx => handleConfluenceHistory(ctx, await confluenceInternal.bearerSession(ctx)) },
   '/v1/w8/paper-attachments': { GET: async ctx => handleW8LibraryAttachments(ctx, await confluenceInternal.bearerSession(ctx)) },
   '/v1/w8/capabilities': { GET: ctx => handleCapabilities(ctx) },
@@ -967,7 +1262,8 @@ export function matchW8(pathname) {
 
 function isW8WriteRoute(ctx) {
   return (ctx.match.template === '/v1/w8/submit' && ctx.request.method === 'POST') ||
-    (ctx.match.template === '/v1/w8/paper-sync' && ctx.request.method === 'PUT');
+    (ctx.match.template === '/v1/w8/paper-sync' && ctx.request.method === 'PUT') ||
+    (ctx.match.template === '/v1/w8/history/jira-link' && ctx.request.method === 'POST');
 }
 
 function makeBudgetedFetch(ctx, budget) {

@@ -17,6 +17,7 @@
   const CONTROL_RE = /[\u0000-\u001f\u007f]+/g;
   const INERT_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/g;
   const ISSUE_ID_RE = /^[A-Z][A-Z0-9_]{1,15}-[1-9][0-9]{0,7}$/;
+  const FLS_ISSUE_RE = /^FLS-[1-9][0-9]{0,7}$/;
   const ATTACHMENT_TYPES = new Set(['pdf', 'text', 'file']);
 
   const SOURCE_LABEL = {
@@ -31,12 +32,13 @@
     site_not_allowed: 'Falsify 사이트 설정을 확인해 주세요.',
     space_not_allowed: 'Falsify Confluence 공간 설정을 확인해 주세요.',
     parent_not_allowed: 'Falsify Confluence 공간 설정을 확인해 주세요.',
-    issue_not_allowed: '허용된 Jira 프로젝트 기록만 확인할 수 있어요.',
+    issue_not_allowed: '허용된 FLS Jira 이슈만 선택할 수 있어요.',
+    not_found: '선택한 FLS 이슈를 찾을 수 없어요. 기존 이슈 키를 확인해 주세요.',
     rate_limited: '요청이 많아 잠시 뒤 다시 시도해 주세요.',
     network: '네트워크 오류로 팀 기록을 불러오지 못했어요. 다시 시도해 주세요.',
     timeout: '응답 시간이 초과됐어요. 다시 시도해 주세요.',
     popup_blocked: '로그인 팝업이 차단됐어요. 팝업을 허용한 뒤 다시 눌러 주세요.',
-    auth_cancelled: 'Jira 읽기 권한 연결을 취소했어요.',
+    auth_cancelled: 'Jira 권한 연결을 취소했어요.',
   };
 
   function isObj(value) {
@@ -257,6 +259,13 @@
     };
   }
 
+  function sanitizeAnalysis(raw) {
+    if (!isObj(raw?.stats)) return null;
+    const stats = raw.stats;
+    if (!Number.isSafeInteger(stats.runCount) || !Array.isArray(stats.byFindingType)) return null;
+    return { stats, round: isObj(raw.round) ? raw.round : null };
+  }
+
   function sanitizeHistoryDetail(raw, fallback, source) {
     const src = isObj(raw) ? raw : {};
     const id = cleanText(String(src.id ?? fallback?.id ?? ''), 120);
@@ -265,6 +274,7 @@
       links: sanitizeArray(src.links, sanitizeLink),
       attachments: sanitizeArray(src.attachments, sanitizeAttachment),
       nextAttachmentCursor: cleanCursor(src.nextAttachmentCursor),
+      analysis: sanitizeAnalysis(src.analysis),
     });
   }
 
@@ -318,6 +328,14 @@
       attErrorMap: new Map(),
       textPreviews: new Map(),
       activeTextAttId: '',
+      jiraLinkGen: 0,
+      jiraLinkSending: false,
+      jiraLinkNeedsScope: false,
+      jiraLinkIssueKey: '',
+      jiraLinkPatternKey: '',
+      jiraLinkStatus: '',
+      jiraLinkError: '',
+      jiraLinkResult: null,
     };
   }
 
@@ -325,6 +343,7 @@
     src.detailGen += 1;
     src.attGen += 1;
     src.fileGen += 1;
+    src.jiraLinkGen += 1;
     src.selectedId = '';
     src.detail = null;
     src.detailLoading = false;
@@ -335,6 +354,13 @@
     src.attErrorMap.clear();
     src.textPreviews.clear();
     src.activeTextAttId = '';
+    src.jiraLinkSending = false;
+    src.jiraLinkNeedsScope = false;
+    src.jiraLinkIssueKey = '';
+    src.jiraLinkPatternKey = '';
+    src.jiraLinkStatus = '';
+    src.jiraLinkError = '';
+    src.jiraLinkResult = null;
   }
 
   function resetSourceState(src) {
@@ -675,12 +701,297 @@
     return [err, retry];
   }
 
-  function buildDetailBodyParts(doc, src, handlers) {
+  function formatRecallPercent(row) {
+    return row.recallPercent === null ? '계산 불가' : row.recallPercent.toFixed(1) + '%';
+  }
+
+  function buildStatsSection(doc, stats) {
+    const box = doc.createElement('div');
+    box.className = 'w8-history-sub w8-history-stats';
+    const label = doc.createElement('span');
+    label.className = 'booth-klab';
+    label.textContent = '실행·유형 집계';
+    box.append(label);
+
+    const summary = doc.createElement('p');
+    summary.className = 'booth-small w8-history-stats-summary';
+    const legacyPart = stats.legacyRunCount > 0 ? ' · 메타데이터 미분류 실행 ' + stats.legacyRunCount + '건' : '';
+    summary.textContent = '실행 ' + stats.runCount + '건 · 지적 ' + stats.findingCount + '건' + legacyPart;
+    box.append(summary);
+
+    if (stats.byFindingType.length) {
+      const typeLine = doc.createElement('p');
+      typeLine.className = 'booth-mono-meta w8-history-type-counts';
+      typeLine.textContent = 'W8 유형별 지적: ' + stats.byFindingType.map(t => t.type + ' ' + t.count + '건').join(' · ');
+      box.append(typeLine);
+    }
+
+    if (stats.byCondition.length) {
+      const condLine = doc.createElement('p');
+      condLine.className = 'booth-mono-meta w8-history-condition-counts';
+      condLine.textContent = '조건별 실행: ' + stats.byCondition.map(c => c.condition + ' ' + c.runCount + '건(지적 ' + c.findingCount + ')').join(' · ');
+      box.append(condLine);
+    }
+
+    if (stats.byDetector.length) {
+      const detLine = doc.createElement('p');
+      detLine.className = 'booth-mono-meta w8-history-detector-counts';
+      detLine.textContent = '탐지기별 실행: ' + stats.byDetector.map(d => d.detector + ' ' + d.runCount + '건').join(' · ');
+      box.append(detLine);
+    }
+    return box;
+  }
+
+  function buildRepeatedMissNode(doc, miss) {
+    const li = doc.createElement('li');
+    li.className = 'w8-history-att w8-history-miss';
+    li.dataset.defectId = miss.defectId;
+
+    const head = doc.createElement('p');
+    head.className = 'w8-library-title';
+    const parts = [miss.defectId, miss.findingType];
+    if (miss.label) parts.push(miss.label);
+    parts.push('미검출 ' + miss.missedRunCount + '회');
+    head.textContent = parts.join(' · ');
+    li.append(head);
+
+    const meta = doc.createElement('p');
+    meta.className = 'booth-mono-meta';
+    const metaParts = [];
+    if (miss.conditions.length) metaParts.push('조건 ' + miss.conditions.join(', '));
+    if (miss.detectors.length) metaParts.push('탐지기 ' + miss.detectors.join(', '));
+    if (miss.runIds.length) metaParts.push('실행 ' + miss.runIds.join(', '));
+    meta.textContent = metaParts.join(' · ');
+    li.append(meta);
+
+    for (const ev of miss.evidence) {
+      const p = doc.createElement('p');
+      p.className = 'booth-small w8-history-miss-evidence';
+      const evParts = [];
+      if (ev.runId) evParts.push(ev.runId);
+      if (ev.condition) evParts.push('조건 ' + ev.condition);
+      if (ev.detector) evParts.push(ev.detector);
+      if (ev.model) evParts.push(ev.model);
+      if (ev.page !== null) evParts.push(ev.page + '쪽');
+      if (ev.locationLabel) evParts.push(ev.locationLabel);
+      const header = evParts.join(' · ');
+      const body = [ev.quote ? '"' + ev.quote + '"' : '', ev.rationale].filter(Boolean).join(' — ');
+      p.textContent = header && body ? header + ': ' + body : (body || header);
+      li.append(p);
+    }
+    return li;
+  }
+
+  function buildRoundSection(doc, round) {
+    const box = doc.createElement('div');
+    box.className = 'w8-history-sub w8-history-round';
+    const label = doc.createElement('span');
+    label.className = 'booth-klab';
+    label.textContent = '회차 채점·회수율';
+    box.append(label);
+
+    if (!round || round.status !== 'ready') {
+      const note = doc.createElement('p');
+      note.className = 'booth-small w8-history-round-ungraded';
+      note.textContent = '합의 판정이 연결되면 조건별 회수율을 표시해요.';
+      box.append(note);
+      return box;
+    }
+
+    const head = doc.createElement('p');
+    head.className = 'booth-mono-meta w8-history-round-meta';
+    const headParts = [];
+    if (round.roundId) headParts.push(round.roundId);
+    if (round.revisionSha256) headParts.push('수정본 ' + round.revisionSha256.slice(0, 12));
+    headParts.push('심은 결함 ' + round.plantedCount + '건');
+    headParts.push('채점 실행 ' + round.scoredRunCount + '건');
+    head.textContent = headParts.join(' · ');
+    box.append(head);
+
+    if (round.byCondition.length) {
+      const ul = doc.createElement('ul');
+      ul.className = 'w8-history-links w8-history-recall-list';
+      for (const row of round.byCondition) {
+        const li = doc.createElement('li');
+        li.className = 'booth-small w8-history-recall-row';
+        li.dataset.condition = row.condition;
+        li.textContent = '조건 ' + row.condition + ': 회수율 ' + formatRecallPercent(row)
+          + ' (실행 ' + row.runCount + '건 · 적중 ' + row.detected + ' · 부분 ' + row.partial
+          + ' · 미검출 ' + row.missed + ' / 심은 결함 ' + row.plantedCount + ')';
+        ul.append(li);
+      }
+      box.append(ul);
+    }
+
+    if (round.repeatedMisses.length) {
+      const missLabel = doc.createElement('span');
+      missLabel.className = 'booth-klab';
+      missLabel.textContent = '반복 미검출 (2회 이상)';
+      box.append(missLabel);
+      const ul = doc.createElement('ul');
+      ul.className = 'w8-history-attachments w8-history-misses';
+      for (const miss of round.repeatedMisses) ul.append(buildRepeatedMissNode(doc, miss));
+      box.append(ul);
+    }
+    return box;
+  }
+
+  function buildPatternChoices(detail) {
+    const choices = [];
+    const analysis = detail?.analysis;
+    const round = analysis?.round;
+    const stats = analysis?.stats;
+    const roundSummary = round?.status === 'ready' && round.byCondition.length
+      ? round.byCondition.map(c => '조건 ' + c.condition + ' ' + formatRecallPercent(c)).join(', ')
+      : '';
+    if (round?.repeatedMisses?.length) {
+      for (const miss of round.repeatedMisses) {
+        const labelParts = [miss.defectId, miss.findingType];
+        if (miss.label) labelParts.push(miss.label);
+        labelParts.push('반복 미검출 ' + miss.missedRunCount + '회');
+        choices.push({
+          key: 'defect:' + round.revisionSha256 + ':' + miss.defectId,
+          label: labelParts.join(' · '),
+          revisionSha256: miss.revisionSha256 || round.revisionSha256 || '',
+          summary: [
+            '실행 ' + (stats?.runCount || round.scoredRunCount) + '건',
+            roundSummary,
+            miss.defectId + ' 미검출 ' + miss.missedRunCount + '회',
+          ].filter(Boolean).join(' · '),
+        });
+      }
+    }
+    if (stats?.byFindingType?.length) {
+      for (const entry of stats.byFindingType.slice(0, 8)) {
+        choices.push({
+          key: 'type:' + entry.type,
+          label: 'W8 유형 ' + entry.type + ' (' + entry.count + '건)',
+          revisionSha256: round?.revisionSha256 || '',
+          summary: ['실행 ' + stats.runCount + '건', '지적 ' + stats.findingCount + '건', entry.type + ' ' + entry.count + '건', roundSummary].filter(Boolean).join(' · '),
+        });
+      }
+    }
+    choices.push({
+      key: 'page:' + detail.id,
+      label: detail.title,
+      revisionSha256: round?.revisionSha256 || '',
+      summary: [stats ? '실행 ' + stats.runCount + '건 · 지적 ' + stats.findingCount + '건' : '', roundSummary].filter(Boolean).join(' · '),
+    });
+    return choices;
+  }
+
+  function buildJiraLinkSection(doc, src, detail, handlers) {
+    const box = doc.createElement('div');
+    box.className = 'w8-history-sub w8-history-jira-link';
+    const label = doc.createElement('span');
+    label.className = 'booth-klab';
+    label.textContent = '개선 과제로 보내기';
+    box.append(label);
+
+    const choices = buildPatternChoices(detail);
+    const activePatternKey = choices.some(c => c.key === src.jiraLinkPatternKey)
+      ? src.jiraLinkPatternKey
+      : choices[0].key;
+    const selectedPattern = choices.find(c => c.key === activePatternKey) || choices[0];
+
+    const patternSelect = doc.createElement('select');
+    patternSelect.className = 'w8-history-jira-pattern';
+    patternSelect.setAttribute('aria-label', '연결할 패턴 선택');
+    for (const c of choices) {
+      const opt = doc.createElement('option');
+      opt.value = c.key;
+      opt.textContent = c.label;
+      if (c.key === activePatternKey) opt.selected = true;
+      patternSelect.append(opt);
+    }
+    patternSelect.value = activePatternKey;
+    patternSelect.addEventListener('change', () => handlers.onChangeJiraPattern(patternSelect.value));
+    box.append(patternSelect);
+
+    const controls = doc.createElement('div');
+    controls.className = 'w8-history-detail-actions w8-history-jira-controls';
+
+    const knownIssues = handlers.jiraIssues.filter(it => FLS_ISSUE_RE.test(it.id));
+    const currentIssue = src.jiraLinkIssueKey || knownIssues[0]?.id || 'FLS-18';
+
+    if (knownIssues.length) {
+      const issueSelect = doc.createElement('select');
+      issueSelect.className = 'w8-history-jira-issue-select';
+      issueSelect.setAttribute('aria-label', '기존 FLS 이슈 선택');
+      for (const issue of knownIssues) {
+        const opt = doc.createElement('option');
+        opt.value = issue.id;
+        opt.textContent = issue.id + ' · ' + issue.title;
+        if (issue.id === currentIssue) opt.selected = true;
+        issueSelect.append(opt);
+      }
+      issueSelect.value = knownIssues.some(it => it.id === currentIssue) ? currentIssue : knownIssues[0].id;
+      issueSelect.addEventListener('change', () => {
+        issueInput.value = issueSelect.value;
+        handlers.onChangeJiraIssue(issueSelect.value);
+      });
+      controls.append(issueSelect);
+    }
+
+    const issueInput = doc.createElement('input');
+    issueInput.type = 'text';
+    issueInput.className = 'w8-history-jira-issue-input';
+    issueInput.value = currentIssue;
+    issueInput.placeholder = '예: FLS-18';
+    issueInput.setAttribute('aria-label', '기존 FLS 이슈 키');
+    issueInput.addEventListener('input', () => handlers.onChangeJiraIssue(issueInput.value));
+    issueInput.addEventListener('change', () => handlers.onChangeJiraIssue(issueInput.value));
+    controls.append(issueInput);
+
+    const sendBtn = doc.createElement('button');
+    sendBtn.type = 'button';
+    sendBtn.className = 'booth-btn line slim w8-history-jira-send';
+    sendBtn.disabled = src.jiraLinkSending;
+    sendBtn.textContent = src.jiraLinkSending ? '기록하는 중…' : src.jiraLinkNeedsScope ? 'Jira 연결 후 보내기' : '개선 과제로 보내기';
+    sendBtn.addEventListener('click', () => {
+      const livePattern = choices.find(c => c.key === patternSelect.value) || selectedPattern;
+      void handlers.onSendJiraLink({
+        issueKey: issueInput.value,
+        pattern: livePattern,
+      });
+    });
+    controls.append(sendBtn);
+    box.append(controls);
+
+    if (src.jiraLinkError) {
+      const err = doc.createElement('p');
+      err.className = 'booth-feedback w8-history-status-error w8-history-jira-feedback';
+      err.textContent = src.jiraLinkError;
+      box.append(err);
+    } else if (src.jiraLinkStatus) {
+      const msg = doc.createElement('p');
+      msg.className = 'booth-feedback w8-history-jira-feedback';
+      msg.textContent = src.jiraLinkStatus;
+      box.append(msg);
+    }
+
+    if (src.jiraLinkResult?.issueUrl) {
+      box.append(makeExternalLink(
+        doc,
+        src.jiraLinkResult.issueUrl,
+        src.jiraLinkResult.issueKey + ' 댓글 보기',
+        src.jiraLinkResult.issueKey + ' Jira 댓글 열기',
+      ));
+    }
+    return box;
+  }
+
+  function buildDetailBodyParts(doc, source, src, handlers) {
     const parts = [];
     const bodyEl = doc.createElement('div');
     bodyEl.className = src.detail.text ? 'w8-history-text' : 'booth-small';
     bodyEl.textContent = src.detail.text || '본문이 없어요.';
     parts.push(bodyEl);
+    if (source === 'confluence' && src.detail.analysis) {
+      if (src.detail.analysis.stats) parts.push(buildStatsSection(doc, src.detail.analysis.stats));
+      parts.push(buildRoundSection(doc, src.detail.analysis.round));
+      parts.push(buildJiraLinkSection(doc, src, src.detail, handlers));
+    }
     if (src.detail.links.length) parts.push(buildLinksSection(doc, src.detail.links));
     if (src.detail.attachments.length || src.detail.nextAttachmentCursor || src.attError) {
       parts.push(buildAttachmentsSection(doc, src, src.detail, handlers));
@@ -705,7 +1016,7 @@
       return parts;
     }
     if (!src.detail) return parts;
-    return parts.concat(buildDetailBodyParts(doc, src, handlers));
+    return parts.concat(buildDetailBodyParts(doc, source, src, handlers));
   }
 
   function computeSourceStatus(source, src, jiraConnecting, authExpired) {
@@ -723,6 +1034,7 @@
     return Object.assign({}, detail, {
       links: detail.links.map(l => Object.assign({}, l)),
       attachments: detail.attachments.map(a => Object.assign({}, a)),
+      analysis: detail.analysis ? JSON.parse(JSON.stringify(detail.analysis)) : null,
     });
   }
 
@@ -740,6 +1052,10 @@
       attLoadingMore: src.attLoadingMore,
       attError: src.attError,
       activeTextAttId: src.activeTextAttId,
+      jiraLinkSending: src.jiraLinkSending,
+      jiraLinkStatus: src.jiraLinkStatus,
+      jiraLinkError: src.jiraLinkError,
+      jiraLinkResult: src.jiraLinkResult ? Object.assign({}, src.jiraLinkResult) : null,
       items: src.items.map(it => Object.assign({}, it)),
       detail: cloneDetailSnapshot(src.detail),
     };
@@ -910,10 +1226,14 @@
       nodes.detail.hidden = false;
       const parts = buildDetailContent(d.doc, source, src, {
         busyPdf,
+        jiraIssues: st.sources.jira.items,
         onClose: () => closeDetail(source),
         onRetryDetail: () => loadDetail(source, src.selectedId),
         onMoreAttachments: () => loadMoreAttachments(source, src.selectedId),
         onOpenAttachment: att => openAttachment(source, src.selectedId, att),
+        onChangeJiraPattern: key => { src.jiraLinkPatternKey = cleanText(key, 160); },
+        onChangeJiraIssue: key => { src.jiraLinkIssueKey = cleanText(key, 32).toUpperCase(); },
+        onSendJiraLink: args => sendJiraLink(source, src.selectedId, args),
       });
       nodes.detail.replaceChildren(...parts);
     }
@@ -1239,6 +1559,78 @@
       }
     }
 
+    function jiraLinkSuccessCopy(res) {
+      if (res.alreadyExisted) return res.issueKey + '의 기존 패턴 댓글에 이미 기록되어 있어요.';
+      if (res.updated) return res.issueKey + '의 기존 패턴 댓글에 Confluence 링크를 갱신했어요.';
+      return res.issueKey + ' 댓글에 Confluence 링크를 기록했어요.';
+    }
+
+    async function sendJiraLink(source, itemId, { issueKey, pattern } = {}) {
+      if (st.destroyed || source !== 'confluence' || !itemId) return null;
+      if (!isConnected()) { clear({ authExpired: true }); return null; }
+      const src = st.sources.confluence;
+      if (!src.detail || src.detail.id !== itemId || src.jiraLinkSending) return null;
+      const cleanIssue = cleanText(String(issueKey || src.jiraLinkIssueKey || ''), 32).toUpperCase();
+      src.jiraLinkIssueKey = cleanIssue;
+      if (!FLS_ISSUE_RE.test(cleanIssue)) {
+        src.jiraLinkError = '기존 FLS 이슈 키(예: FLS-18)를 입력해 주세요.';
+        src.jiraLinkStatus = '';
+        paint();
+        return null;
+      }
+      const syncBase = currentSyncBase();
+      if (!syncBase || typeof d.team?.historyJiraLink !== 'function') {
+        src.jiraLinkError = ERROR_COPY.not_configured;
+        src.jiraLinkStatus = '';
+        paint();
+        return null;
+      }
+      const chosen = pattern || buildPatternChoices(src.detail)[0];
+      src.jiraLinkPatternKey = chosen.key;
+      const sGen = st.sessionGen;
+      const dGen = src.detailGen;
+      const jGen = ++src.jiraLinkGen;
+      src.jiraLinkSending = true;
+      src.jiraLinkError = '';
+      src.jiraLinkStatus = '';
+      paint();
+      try {
+        if (src.jiraLinkNeedsScope) await d.team.connect({ base: syncBase });
+        const res = await d.team.historyJiraLink({
+          issueKey: cleanIssue,
+          pageId: itemId,
+          patternKey: chosen.key,
+          patternLabel: chosen.label,
+          summary: chosen.summary,
+          ...(chosen.revisionSha256 ? { revisionSha256: chosen.revisionSha256 } : {}),
+        }, { base: syncBase });
+        if (isStaleDetail('confluence', itemId, sGen, dGen) || jGen !== src.jiraLinkGen) return null;
+        src.jiraLinkSending = false;
+        src.jiraLinkNeedsScope = false;
+        src.jiraLinkResult = {
+          issueKey: cleanText(res?.issueKey || cleanIssue, 32),
+          issueUrl: allowedSiteUrl(res?.issueUrl),
+          commentId: cleanText(String(res?.commentId ?? ''), 64),
+          reused: res?.reused === true,
+          updated: res?.updated === true,
+          alreadyExisted: res?.alreadyExisted === true,
+        };
+        src.jiraLinkStatus = jiraLinkSuccessCopy(src.jiraLinkResult);
+        paint();
+        return src.jiraLinkResult;
+      } catch (err) {
+        if (st.destroyed || sGen !== st.sessionGen || dGen !== src.detailGen || jGen !== src.jiraLinkGen) return null;
+        src.jiraLinkSending = false;
+        if (isAuthFailure(err)) { clear({ authExpired: true }); return null; }
+        src.jiraLinkNeedsScope = isJiraScopeError(err);
+        src.jiraLinkError = src.jiraLinkNeedsScope
+          ? '댓글을 기록하려면 Jira 쓰기 권한을 연결해 주세요.'
+          : historyErrorMessage(err, 'jira');
+        paint();
+        return null;
+      }
+    }
+
     function openAttachment(source, itemId, attachment) {
       if (st.destroyed || !isValidSource(source) || !itemId || !attachment?.id) return Promise.resolve();
       if (!isConnected()) { clear({ authExpired: true }); return Promise.resolve(); }
@@ -1365,6 +1757,7 @@
       closeDetail,
       loadMoreAttachments,
       openAttachment,
+      sendJiraLink: (itemId, opts) => sendJiraLink('confluence', itemId, opts),
       connectJira,
       clear,
       setBusy,

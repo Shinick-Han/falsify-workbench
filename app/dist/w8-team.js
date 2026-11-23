@@ -526,6 +526,7 @@
       if (bare.startsWith('/v1/w8/auth/')) return AUTH_MS;
       if (bare === '/v1/w8/paper-attachments' && path.includes('attachmentId=')) return SUBMIT_MS;
       if (method === 'POST' && bare === '/v1/w8/submit') return SUBMIT_MS;
+      if (method === 'POST' && bare === '/v1/w8/history/jira-link') return SUBMIT_MS;
       if (method === 'PUT' && bare === '/v1/w8/paper-sync') return SUBMIT_MS;
       return READ_MS;
     }
@@ -777,6 +778,54 @@
 
     function connectHistory({ base } = {}) {
       return connect({ base, history: true });
+    }
+
+    function normalizeHistoryJiraLinkPayload(payload) {
+      if (!isPlain(payload)) throw w8Error('invalid_request', 'Jira 연결 정보가 올바르지 않습니다.');
+      const issueKey = String(payload.issueKey || '').trim().toUpperCase();
+      if (!/^FLS-[1-9][0-9]{0,7}$/.test(issueKey)) {
+        throw w8Error('issue_not_allowed', '기존 FLS 이슈 키(예: FLS-18)를 입력해 주세요.');
+      }
+      const pageId = String(payload.pageId || '').trim();
+      if (!/^\d{1,20}$/.test(pageId)) throw w8Error('invalid_request', 'Confluence 페이지 번호가 올바르지 않습니다.');
+      const patternKey = cleanStr(payload.patternKey, false);
+      if (!patternKey || patternKey.length > 160) throw w8Error('invalid_request', '연결할 패턴 키가 필요합니다.');
+      const body = { issueKey, pageId, patternKey };
+      const patternLabel = cleanStr(payload.patternLabel, false);
+      if (patternLabel) body.patternLabel = patternLabel.slice(0, 240);
+      const summary = cleanStr(payload.summary, false);
+      if (summary) body.summary = summary.slice(0, 400);
+      const rev = optionalHex(typeof payload.revisionSha256 === 'string' ? payload.revisionSha256.trim().toLowerCase() : '');
+      if (rev) body.revisionSha256 = rev;
+      return body;
+    }
+
+    function parseHistoryJiraLinkResponse(res, fallback) {
+      const issueUrl = allowedSiteUrl(res?.issueUrl);
+      const pageUrl = allowedSiteUrl(res?.pageUrl);
+      const commentId = String(res?.commentId ?? '').trim();
+      if (!res?.linked || !issueUrl || !commentId) {
+        throw w8Error('response', 'Jira 댓글 연결 응답이 올바르지 않습니다.');
+      }
+      return {
+        linked: true,
+        issueKey: String(res.issueKey || fallback.issueKey),
+        issueUrl,
+        commentId,
+        pageId: String(res.pageId || fallback.pageId),
+        pageUrl: pageUrl || '',
+        patternHash: String(res.patternHash || ''),
+        linkedPageIds: Array.isArray(res.linkedPageIds) ? res.linkedPageIds.map(String) : [fallback.pageId],
+        reused: res.reused === true,
+        updated: res.updated === true,
+        alreadyExisted: res.alreadyExisted === true,
+      };
+    }
+
+    async function historyJiraLink(payload, { base } = {}) {
+      const body = normalizeHistoryJiraLinkPayload(payload);
+      const res = await paperRequest('POST', '/v1/w8/history/jira-link', { base, body });
+      return parseHistoryJiraLinkResponse(res, body);
     }
 
     async function paperSync(payload, { base } = {}) {
@@ -1051,7 +1100,7 @@
       refreshSession,
       listPapers,
       listPaperAttachments,
-      historyList, historyDetail, historyFile, connectHistory,
+      historyList, historyDetail, historyFile, connectHistory, historyJiraLink,
       getPaperAttachment,
       getPaper,
       paperSync,
@@ -1096,6 +1145,7 @@
     historyDetail: (source, id, opts) => instance().historyDetail(source, id, opts),
     historyFile: (source, id, attachment, opts) => instance().historyFile(source, id, attachment, opts),
     connectHistory: opts => instance().connectHistory(opts),
+    historyJiraLink: (payload, opts) => instance().historyJiraLink(payload, opts),
     getPaperAttachment: (id, opts) => instance().getPaperAttachment(id, opts),
     getPaper: (id, opts) => instance().getPaper(id, opts),
     paperSync: (payload, opts) => instance().paperSync(payload, opts),

@@ -1354,6 +1354,11 @@ describe('W8 team paper library reads (GET /v1/w8/papers)', { concurrency: false
       sourceSha256: ragasSha,
       arxivId: '2309.15217',
       sourceDriveId: null,
+      stats: {
+        runCount: 1,
+        findingCount: 1,
+        byFindingType: [{ type: '미분류', count: 1 }],
+      },
     });
     assert.equal(ragasDetail.text.includes('RAGAS_INTERNAL_QUOTE'), false);
 
@@ -1372,6 +1377,11 @@ describe('W8 team paper library reads (GET /v1/w8/papers)', { concurrency: false
       sourceSha256: SRC_A,
       arxivId: null,
       sourceDriveId: 'DriveOriginalFile01',
+      stats: {
+        runCount: 1,
+        findingCount: 1,
+        byFindingType: [{ type: '미분류', count: 1 }],
+      },
     });
     assert.equal(modernDetail.text.includes('DriveRevisionFile02'), false);
     assert.equal(modernDetail.text.includes('PRIVATE_FINDING_QUOTE'), false);

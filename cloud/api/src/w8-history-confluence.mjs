@@ -12,6 +12,13 @@ import {
   budgetedFetch,
   confluenceInternal,
 } from './confluence.mjs';
+import { W8_ARCHIVE_SCHEMA, sha256HexBytes } from './w8-archive.mjs';
+import {
+  W8_PAPER_SYNC_SCHEMA,
+  parseAppOwnedPaperBody,
+  validateRoundGradesPayload,
+  analyzeTeamRecord,
+} from './w8-paper-sync.mjs';
 
 export const HISTORY_SOURCE = 'confluence';
 export const DEFAULT_ARCHIVE_PARENT_ID = '8355842';
@@ -740,6 +747,99 @@ async function listPageAttachments(fetchImpl, base, session, key, pageId, upstre
   return { attachments, nextAttachmentCursor };
 }
 
+const HEX64 = /^[a-f0-9]{64}$/;
+
+function normalizeArchiveRuns(archive) {
+  const topCondition = typeof archive?.condition === 'string' ? archive.condition : '';
+  const rawRuns = Array.isArray(archive?.runs) ? archive.runs : [];
+  return rawRuns.map(run => {
+    const fileHash = typeof run?.fileHash === 'string' && HEX64.test(run.fileHash) ? run.fileHash : null;
+    const sourceHash = typeof run?.sourceHash === 'string' && HEX64.test(run.sourceHash) ? run.sourceHash : null;
+    const revisionSha256 = fileHash && fileHash !== sourceHash ? fileHash : null;
+    return {
+      id: run?.id || '',
+      revisionSha256,
+      detector: run?.detector || '',
+      model: run?.model || '',
+      condition: topCondition || run?.promptCondition || '',
+      findings: Array.isArray(run?.findings) ? run.findings : [],
+    };
+  });
+}
+
+async function lookupAttachmentByFilename(fetchImpl, base, token, pageId, filename) {
+  const url = `${base}/wiki/api/v2/pages/${pageId}/attachments?filename=${encodeURIComponent(filename)}&limit=5`;
+  const res = await confluenceInternal.callUpstream(fetchImpl, url, {
+    headers: confluenceInternal.authHeaders(token),
+  });
+  if (res.status !== 200) return null;
+  const payload = await confluenceInternal.readUpstreamJson(res);
+  const results = Array.isArray(payload?.results) ? payload.results : [];
+  const hit = results.find(item => item && item.title === filename && ATTACHMENT_ID.test(String(item.id)));
+  return hit ? String(hit.id) : null;
+}
+
+async function loadVerifiedJsonAttachment(fetchImpl, base, session, pageId, attachments, expectedSha) {
+  const filename = `${expectedSha}.json`;
+  let attId = attachments.find(a => a.title === filename)?.id || null;
+  if (!attId) attId = await lookupAttachmentByFilename(fetchImpl, base, session.accessToken, pageId, filename);
+  if (!attId) return null;
+  const bytes = await downloadAttachmentBytes(fetchImpl, base, session, pageId, attId, MAX_ARCHIVE_BYTES);
+  if ((await sha256HexBytes(bytes)) !== expectedSha) return null;
+  return JSON.parse(strictDecoder.decode(bytes));
+}
+
+async function loadStructuredRunsForPage(fetchImpl, base, session, page, pageId, attachments) {
+  const paperProp = pagePropertyByKey(page, 'falsify-w8-paper-sync');
+  if (paperProp && paperProp.ready === true && HEX64.test(String(paperProp.sourceSha256 || ''))) {
+    const parsedBody = parseAppOwnedPaperBody(page?.body?.storage?.value, paperProp.sourceSha256);
+    const stateSha = parsedBody && parsedBody.stateToken !== 'pending'
+      ? parsedBody.stateToken
+      : (HEX64.test(String(paperProp.stateSha256 || '')) ? paperProp.stateSha256 : null);
+    if (!stateSha) return { isStructured: true, runs: [] };
+    const state = await loadVerifiedJsonAttachment(fetchImpl, base, session, pageId, attachments, stateSha);
+    if (state && state.schema === W8_PAPER_SYNC_SCHEMA && state.sourceSha256 === paperProp.sourceSha256 && Array.isArray(state.runs)) {
+      return { isStructured: true, runs: state.runs };
+    }
+    return { isStructured: true, runs: [] };
+  }
+
+  const w8Prop = pagePropertyByKey(page, 'falsify-w8-archive');
+  if (w8Prop && w8Prop.ready === true && HEX64.test(String(w8Prop.archiveSha256 || ''))) {
+    const archive = await loadVerifiedJsonAttachment(fetchImpl, base, session, pageId, attachments, w8Prop.archiveSha256);
+    if (archive && archive.schema === W8_ARCHIVE_SCHEMA && Array.isArray(archive.runs)) {
+      return { isStructured: true, runs: normalizeArchiveRuns(archive) };
+    }
+    return { isStructured: true, runs: [] };
+  }
+
+  return { isStructured: false, runs: [] };
+}
+
+async function loadRoundGradesAttachment(fetchImpl, base, session, pageId, attachments) {
+  const filename = 'w8-round-grades.json';
+  try {
+    const attId = attachments.find(attachment => attachment.title === filename)?.id
+      || await lookupAttachmentByFilename(fetchImpl, base, session.accessToken, pageId, filename);
+    if (!attId) return null;
+    const bytes = await downloadAttachmentBytes(fetchImpl, base, session, pageId, attId, MAX_ARCHIVE_BYTES);
+    return validateRoundGradesPayload(JSON.parse(strictDecoder.decode(bytes)));
+  } catch {
+    return null;
+  }
+}
+
+async function resolvePageAnalysis(fetchImpl, base, session, page, pageId, attachments) {
+  try {
+    const { isStructured, runs } = await loadStructuredRunsForPage(fetchImpl, base, session, page, pageId, attachments);
+    if (!isStructured) return null;
+    const roundGrades = runs.length ? await loadRoundGradesAttachment(fetchImpl, base, session, pageId, attachments) : null;
+    return analyzeTeamRecord({ runs, roundGrades });
+  } catch {
+    return null;
+  }
+}
+
 async function handleDetailMode(fetchImpl, session, cfg, key, pageId, attachmentCursor) {
   const upstreamAttCursor = await openHistoryCursor(attachmentCursor, key, ATT_CURSOR_PURPOSE, {
     cloudId: session.cloudId,
@@ -757,6 +857,9 @@ async function handleDetailMode(fetchImpl, session, cfg, key, pageId, attachment
   );
   const { kind, title } = resolvePageKindAndTitle(page, cfg);
   const { text, links } = extractPageBodyContent(page, title, kind);
+  const analysis = attachmentCursor === null
+    ? await resolvePageAnalysis(fetchImpl, base, session, page, pageId, attachments)
+    : null;
   return json(200, {
     id: pageId,
     title,
@@ -767,6 +870,7 @@ async function handleDetailMode(fetchImpl, session, cfg, key, pageId, attachment
     links,
     attachments,
     nextAttachmentCursor,
+    ...(analysis ? { analysis } : {}),
   });
 }
 
