@@ -952,6 +952,33 @@ test('preserves every returned finding including rejected/unresolved/partial wit
   assert.equal(h.host.querySelector('#w8-blue-external-error').hidden, false);
 });
 
+test('external BLUE saves individual findings from a clipped JSON response and retains an unreadable draft', async () => {
+  const h = createHarness({ config: { hostedAi: { enabled: false } } });
+  await h.handle.ready;
+  h.host.querySelector('#w8-blue-tab-external').click();
+  const input = h.host.querySelector('#w8-blue-external-answer');
+  const submit = h.host.querySelector('#w8-blue-external-import');
+  const broken = '{"findings":[{"reportNumber":"F-06","rationale":';
+  input.value = broken;
+  submit.click();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(input.value, broken);
+  assert.equal(h.handle.runs().length, 0);
+  assert.match(h.host.querySelector('#w8-blue-external-error').textContent, /JSON에서 지적 항목을 읽지 못했어요/);
+
+  input.value = '{"reportNumber":"F-06","page":1,"rationale":"First"}, {"reportNumber":"F-07","page":3,"rationale":"Second"}]}';
+  submit.click();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const [run] = h.handle.runs();
+  const [stored] = JSON.parse(h.ls.getItem(W8Blue.RUNS_STORE_KEY)).runs;
+  assert.equal(stored.partial, true);
+  assert.deepEqual(Array.from(run.findings, finding => finding.id), ['F-06', 'F-07']);
+  assert.deepEqual(Array.from(run.findings, finding => finding.pageIndex), [0, 2]);
+  const cards = h.host.querySelector('#w8-blue-findings-list').children;
+  assert.equal(cards.filter(card => card.className.includes('w8-finding-card')).length, 2);
+  assert.match(h.host.querySelector('#w8-blue-external-status').textContent, /지적 2건/);
+});
+
 test('durable external dedupe survives reload while explicit re-run creates a distinct run, and storage limit never truncates old runs', async () => {
   const ls = makeStorage();
   const payload = JSON.stringify({ findings: [{ id: 'D-1', page: 1, quote: '10/40 (35.0%)', rationale: 'Pct error' }] });

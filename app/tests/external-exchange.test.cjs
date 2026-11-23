@@ -7,6 +7,28 @@ test('legacy before after and unparsed raw',()=>{const b=X.parse('Before: rate i
 test('structured evidence, independent hashes and role',()=>{const raw=JSON.stringify({role:'blue',sourceHash:'text',findings:[{rationale:'r',evidence:[{segmentId:'s0',quote:'q',relation:'supports'}],references:[{doi:'10.x'}]}]});const b=X.parse(raw,{role:'blue',segments,fileHash:'binary'});assert.deepEqual(b.items[0].evidence,[{segmentId:'s0',quote:'q',relation:'supports'}]);assert.deepEqual(b.items[0].references,[{doi:'10.x'}]);assert.equal(b.diagnostics.length,0);assert.equal(X.parse(raw,{role:'red',segments,fileHash:'binary',sourceHash:'other'}).diagnostics.filter(d=>d.code==='role-mismatch').length,1);assert.match(X.buildPrompt({role:'blue',harness:{name:'test'},segments:[]}),/"name": "test"/);});
 test('bounded import retains original and prose pair rationale',()=>{const raw='Before: international rate is 12% [4].\nAfter: revised\nRationale: Why\nEvidence: Source';const b=X.parse(raw,{role:'red',segments,fileHash:'hash'});assert.equal(b.items[0].after,'revised');assert.equal(b.items[0].rationale,'Why');assert.deepEqual(b.items[0].evidence,['Source']);const big='x'.repeat(200001);const limited=X.parse(big,{role:'blue',segments,fileHash:'hash'});assert.equal(limited.raw,big);assert.equal(limited.diagnostics[0].code,'input-limit');});
 
+test('BLUE parses a clipped JSON tail as individual findings and preserves their evidence',()=>{
+  const findings=[
+    {reportNumber:'F-06',page:1,quote:'international rate is 12% [4].',rationale:'Totals differ.',evidence:[{quote:'Table 1',relation:'contradicts'}]},
+    {reportNumber:'F-07',page:3,rationale:'The quoted text includes a closing bracket ] and a brace }.'}
+  ];
+  const complete=JSON.stringify({findings},null,2);
+  const clipped=complete.slice(complete.indexOf('{',1));
+  const options={role:'blue',segments,fileHash:'hash'};
+  const expected=X.parse(complete,options);
+  assert.equal(expected.items.length,2);
+  for(const raw of [clipped,'```json\n'+clipped+'\n```']){
+    const batch=X.parse(raw,options);
+    assert.equal(batch.raw,raw);
+    assert.equal(batch.partial,true);
+    assert.equal(batch.diagnostics[0].code,'partial-blue-json');
+    assert.deepEqual(batch.items.map(({id,...finding})=>finding),expected.items.map(({id,...finding})=>finding));
+  }
+  const broken=X.parse('{"findings":[{"reportNumber":"F-06","rationale":',options);
+  assert.equal(broken.items.length,0);
+  assert.equal(broken.diagnostics[0].code,'invalid-blue-json');
+});
+
 test('Korean table keeps each finding and trailing report',()=>{const raw='| 번호 | 쪽 | 위치(절, 그림, 표) | 유형 | 심각도 | 인용한 원문 | 왜 결함인가 | 확신 |\n|---|---|---|---|---|---|---|---|\n| 1 | 1 | 표 2 | 새 유형 | 확인필요 | international rate is 12% [4]. | 이유 | 낮음 |\n| 2 | 2 | 절 3 | 다른 유형 | 중 | | 별도 이유 | low |\n\n## 보고서\n후속 설명';const b=X.parse(raw,{role:'blue',segments,fileHash:'hash'});assert.equal(b.raw,raw);assert.equal(b.items.length,2);assert.equal(b.items[0].findingType,'새 유형');assert.equal(b.items[0].severity,'확인필요');assert.equal(b.items[0].confidence,'낮음');assert.equal(b.items[0].pageIndex,0);assert.equal(b.items[1].pageIndex,1);assert.equal(b.items[1].rationale,'별도 이유');assert.equal(b.report,'## 보고서\n후속 설명');});
 test('prompt includes source only when explicitly requested',()=>{assert.doesNotMatch(X.buildPrompt({segments}),/The inter-/);assert.match(X.buildPrompt({segments,includeSource:true}),/The inter-/);});
 test('page hints fall back and suggested candidates never bind automatically',()=>{const b=X.parse('{"findings":[{"quote":"international rate is 12% [4].","page":8}]}',{role:'blue',segments,fileHash:'hash'});assert.equal(b.items[0].matchStatus,'matched');assert.equal(b.items[0].pageIndex,0);globalThis.FalsifyPaperAnchors={find:()=>({status:'suggested',matches:[{segmentId:'s0',pageIndex:0,start:4,end:8,before:'test',score:0.8}]})};try{const s=X.parse('{"findings":[{"quote":"test"}]}',{role:'blue',segments,fileHash:'hash'}).items[0];assert.equal(s.matchStatus,'suggested');assert.equal(s.anchor,null);}finally{delete globalThis.FalsifyPaperAnchors;}});

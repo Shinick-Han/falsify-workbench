@@ -307,6 +307,34 @@
   function canUseRedFallback(role,segments,options){
     return role==='red'&&red&&(segments.length||Array.isArray(options.tables)||Array.isArray(options.figures));
   }
+  function recoverBlueJsonTail(text){
+    if(!/^\{\s*"/u.test(text))return null;
+    const entriesText=text.replace(/\](?:\s*\})?$/u,'');
+    if(entriesText===text)return null;
+    try{
+      const entries=JSON.parse('['+entriesText+']');
+      return entries.every(entry=>entry&&(typeof entry.reportNumber==='string'||typeof entry.id==='string'))?entries:null;
+    }catch{return null;}
+  }
+  function appendBlueTextFallback(raw,segments,batch,options){
+    const trimmed=raw.trim();
+    const fence=/^```json[ \t]*\r?\n([\s\S]*?)(?:\r?\n```)?$/i.exec(trimmed);
+    const text=fence?fence[1].trim():trimmed;
+    const recovered=recoverBlueJsonTail(text);
+    if(recovered){
+      recovered.forEach((entry,index)=>appendResponseItem(entry,index,'blue',segments,batch,options));
+      if(batch.items.length){
+        batch.partial=true;
+        batch.diagnostics.push({code:'partial-blue-json',message:'일부가 빠진 JSON에서 읽을 수 있는 항목을 가져왔어요.'});
+        return;
+      }
+    }
+    if(fence||/^\s*(?:\{\s*"|\[\s*(?:\{|"))/u.test(text)||/(?:^|\n)[ \t]*```json\b/i.test(text)){
+      batch.diagnostics.push({code:'invalid-blue-json',message:'JSON에서 지적 항목을 읽지 못했어요. 붙여넣은 내용은 그대로 있어요.'});
+      return;
+    }
+    batch.items.push({id:id(),kind:'finding',rationale:trimmed,evidence:[],references:[],attackTypes:[],uncertainty:'',segmentId:null,pageIndex:null,matchStatus:'missing',anchor:null,matches:[]});
+  }
   function parse(raw,options={}){
     if(typeof raw!=='string')throw new TypeError('Response must be text');
     const role=options.role;if(role!=='red'&&role!=='blue')throw new Error('Invalid role');
@@ -319,7 +347,7 @@
     const list=responseItems(raw,obj,role,batch);
     if(Array.isArray(list))list.forEach((entry,index)=>appendResponseItem(entry,index,role,segments,batch,options));
     else if(canUseRedFallback(role,segments,options))appendRedFallback(raw,segments,options,batch);
-    else if(role==='blue'&&raw.trim()&&!obj)batch.items.push({id:id(),kind:'finding',rationale:raw.trim(),evidence:[],references:[],attackTypes:[],uncertainty:'',segmentId:null,pageIndex:null,matchStatus:'missing',anchor:null,matches:[]});
+    else if(role==='blue'&&raw.trim()&&!obj)appendBlueTextFallback(raw,segments,batch,options);
     if(batch.items.length)batch.status='ok';
     return batch;
   }

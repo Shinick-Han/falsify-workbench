@@ -1746,6 +1746,8 @@
     function validateExternalBatch(batch, raw){
       if(batch.diagnostics?.some(diag => diag.code === 'role-mismatch')) return 'RED 역할 응답입니다. BLUE 검수 응답을 넣어 주세요.';
       if(batch.diagnostics?.some(diag => diag.code === 'input-limit')) return '응답 길이가 한도를 넘어 가져오지 않았습니다.';
+      const invalidJson = batch.diagnostics?.find(diag => diag.code === 'invalid-blue-json');
+      if(invalidJson) return invalidJson.message;
       if(!batch.items?.length && !isExplicitZeroFindingResponse(raw)){
         return '지적 항목이나 정상 무결함 응답을 찾지 못해 기록하지 않았습니다.';
       }
@@ -1767,7 +1769,7 @@
         condition: cleanStr(meta.conditionInput || batch.condition, 160),
         promptLabel: st.promptLabel,
         privatePrompt: st.privatePrompt,
-        partial: parsed?.partial === true || parsed?.coverage?.complete === false,
+        partial: batch.partial === true || parsed?.partial === true || parsed?.coverage?.complete === false,
         status: cleanStr(parsed?.status, 32) || (zero ? 'ok' : (cleanStr(batch.status, 32) || 'ok')),
         report: cleanStr(batch.report),
         zeroDropSummary: batch.zeroDropSummary ? clone(batch.zeroDropSummary) : null,
