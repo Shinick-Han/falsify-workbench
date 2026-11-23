@@ -1,7 +1,7 @@
-// app/src/browser-pdf.mjs
+// src/browser-pdf.mjs
 import * as mupdf from "./browser-pdf-vendor/mupdf.js";
 
-// app/src/browser-fonts.mjs
+// src/browser-fonts.mjs
 var error = (message) => new Error(message);
 var key = (value) => String(value || "").replace(/^[A-Z]{6}\+/, "").toLowerCase().replace(/[\s_-]+/g, "");
 function parseFont(bytes) {
@@ -89,7 +89,7 @@ function familyKey(value) {
   return { timesnewromanpsmt: "timesnewroman", arialmt: "arial" }[normalized2] || normalized2;
 }
 
-// app/src/paragraph-pdf-content-operators.mjs
+// src/paragraph-pdf-content-operators.mjs
 var ws = (c) => c === 0 || c === 9 || c === 10 || c === 12 || c === 13 || c === 32;
 var delim = (c) => ws(c) || c === void 0 || "()<>[]{}/%".includes(String.fromCharCode(c));
 var identity = () => [1, 0, 0, 1, 0, 0];
@@ -355,7 +355,292 @@ function scanTextShows(input, { measure: measure2 } = {}) {
   return { shows, diagnostics };
 }
 
-// app/src/browser-pdf.mjs
+// src/browser-pdf-source-font.mjs
+var NUMERIC_TOKEN_RE = /^[+-]?(?:\d+(?:[.,]\d+)*|\.\d+)%?$/;
+var NUMERIC_GLYPHS = Object.freeze({
+  37: ["percent"],
+  43: ["plus"],
+  44: ["comma"],
+  45: ["hyphen", "minus"],
+  46: ["period"],
+  48: ["zero"],
+  49: ["one"],
+  50: ["two"],
+  51: ["three"],
+  52: ["four"],
+  53: ["five"],
+  54: ["six"],
+  55: ["seven"],
+  56: ["eight"],
+  57: ["nine"]
+});
+var STANDARD_ASCII_ENCODINGS = /* @__PURE__ */ new Set([
+  "WinAnsiEncoding",
+  "StandardEncoding",
+  "MacRomanEncoding"
+]);
+function isSameLengthNumericReplacement(originalText, newText) {
+  const orig = String(originalText == null ? "" : originalText).replace(/\s+/g, "").trim();
+  const next = String(newText == null ? "" : newText).replace(/\s+/g, "").trim();
+  if (!orig || orig.length !== next.length) return false;
+  return NUMERIC_TOKEN_RE.test(orig) && NUMERIC_TOKEN_RE.test(next);
+}
+function readStreamBytes(streamObj) {
+  const buf = streamObj.readStream();
+  try {
+    return buf.asUint8Array().slice();
+  } finally {
+    buf.destroy();
+  }
+}
+function recordCmapPair(byteToUnicode, unicodeToByte, conflicts, byte, cp) {
+  if (byteToUnicode.has(byte) && byteToUnicode.get(byte) !== cp) {
+    conflicts.add(byte);
+    return;
+  }
+  byteToUnicode.set(byte, cp);
+  if (unicodeToByte.has(cp) && unicodeToByte.get(cp) !== byte) {
+    unicodeToByte.set(cp, -1);
+    return;
+  }
+  unicodeToByte.set(cp, byte);
+}
+function parseSimpleToUnicode(cmapText) {
+  if (!cmapText || /\busecmap\b/.test(cmapText)) return null;
+  const byteToUnicode = /* @__PURE__ */ new Map();
+  const unicodeToByte = /* @__PURE__ */ new Map();
+  const conflicts = /* @__PURE__ */ new Set();
+  for (const section of cmapText.matchAll(/\d+\s+beginbfchar\b([\s\S]*?)endbfchar/g)) {
+    for (const m of section[1].matchAll(/<([\da-fA-F]{2})>\s*<([\da-fA-F]{4})>/g)) {
+      recordCmapPair(byteToUnicode, unicodeToByte, conflicts, parseInt(m[1], 16), parseInt(m[2], 16));
+    }
+  }
+  for (const section of cmapText.matchAll(/\d+\s+beginbfrange\b([\s\S]*?)endbfrange/g)) {
+    const body = section[1];
+    for (const m of body.matchAll(/<([\da-fA-F]{2})>\s*<([\da-fA-F]{2})>\s*<([\da-fA-F]{4})>/g)) {
+      const lo = parseInt(m[1], 16);
+      const hi = parseInt(m[2], 16);
+      const start = parseInt(m[3], 16);
+      if (hi < lo) continue;
+      for (let b = lo; b <= hi; b++) {
+        recordCmapPair(byteToUnicode, unicodeToByte, conflicts, b, start + (b - lo));
+      }
+    }
+    for (const m of body.matchAll(/<([\da-fA-F]{2})>\s*<([\da-fA-F]{2})>\s*\[([\s\S]*?)\]/g)) {
+      const lo = parseInt(m[1], 16);
+      const hi = parseInt(m[2], 16);
+      const targets = [...m[3].matchAll(/<([\da-fA-F]{4})>/g)];
+      for (let i = 0; i < targets.length && lo + i <= hi; i++) {
+        recordCmapPair(byteToUnicode, unicodeToByte, conflicts, lo + i, parseInt(targets[i][1], 16));
+      }
+    }
+  }
+  for (const b of conflicts) byteToUnicode.delete(b);
+  return { byteToUnicode, unicodeToByte };
+}
+function seedAsciiGlyphs(byteToGlyph) {
+  for (const [cpStr, names] of Object.entries(NUMERIC_GLYPHS)) {
+    const cp = Number(cpStr);
+    byteToGlyph.set(cp, names[0]);
+  }
+}
+function safeResolve(ref) {
+  if (!ref || ref.isNull()) return null;
+  const resolved = ref.resolve();
+  return resolved && !resolved.isNull() ? resolved : null;
+}
+function applyEncodingDifferences(diffs, byteToGlyph) {
+  if (!diffs || !diffs.isArray()) return;
+  let code = 0;
+  for (let i = 0; i < diffs.length; i++) {
+    const item = diffs.get(i);
+    if (item.isNumber()) {
+      code = item.asNumber();
+    } else if (item.isName()) {
+      byteToGlyph.set(code, String(item.asName() || ""));
+      code += 1;
+    }
+  }
+}
+function parseSimpleEncoding(fontObj) {
+  const byteToGlyph = /* @__PURE__ */ new Map();
+  const enc = safeResolve(fontObj.get("Encoding"));
+  if (!enc) return { byteToGlyph, explicit: false };
+  if (enc.isName()) {
+    if (STANDARD_ASCII_ENCODINGS.has(String(enc.asName() || ""))) seedAsciiGlyphs(byteToGlyph);
+    return { byteToGlyph, explicit: true };
+  }
+  if (!enc.isDictionary()) return { byteToGlyph, explicit: false };
+  const base = enc.get("BaseEncoding");
+  if (base && !base.isNull() && STANDARD_ASCII_ENCODINGS.has(String(base.asName() || ""))) {
+    seedAsciiGlyphs(byteToGlyph);
+  }
+  applyEncodingDifferences(safeResolve(enc.get("Differences")), byteToGlyph);
+  return { byteToGlyph, explicit: true };
+}
+function parseCharSet(fontDescriptor) {
+  if (!fontDescriptor || fontDescriptor.isNull()) return null;
+  const raw = fontDescriptor.get("CharSet");
+  if (!raw || raw.isNull()) return null;
+  const text = String(raw.asString() || "");
+  if (!text) return null;
+  const names = /* @__PURE__ */ new Set();
+  for (const m of text.matchAll(/\/([^\s/()<>[\]{}%]+)/g)) names.add(m[1]);
+  return names.size ? names : null;
+}
+function readWidths(fontObj) {
+  const widthsObj = safeResolve(fontObj.get("Widths"));
+  const firstObj = fontObj.get("FirstChar");
+  if (!widthsObj || !widthsObj.isArray() || !firstObj || firstObj.isNull() || !firstObj.isNumber()) return null;
+  const widths = [];
+  for (let i = 0; i < widthsObj.length; i++) {
+    const item = widthsObj.get(i);
+    widths.push(item && item.isNumber() ? item.asNumber() : NaN);
+  }
+  return { firstChar: firstObj.asNumber(), widths };
+}
+function findUniquePageFont(page, sourceFontName) {
+  const resources = safeResolve(page.getObject().getInheritable("Resources"));
+  if (!resources) return null;
+  const resolved = safeResolve(resources.get("Font"));
+  if (!resolved) return null;
+  const matches = [];
+  resolved.forEach((value, key2) => {
+    const item = safeResolve(value);
+    if (!item || !item.isDictionary()) return;
+    const subRef = item.get("Subtype");
+    const subtype = subRef && !subRef.isNull() ? String(subRef.asName() || "") : "";
+    if (subtype !== "Type1" && subtype !== "TrueType") return;
+    const baseRef = item.get("BaseFont");
+    const base = baseRef && !baseRef.isNull() ? String(baseRef.asName() || "") : "";
+    if (base !== sourceFontName) return;
+    const indirect = value.isIndirect() ? value.asIndirect() : null;
+    matches.push({ resName: String(key2), fontObj: item, indirect });
+  });
+  if (!matches.length) return null;
+  if (matches.length > 1) {
+    const firstIndirect = matches[0].indirect;
+    if (firstIndirect === null || matches.some((m) => m.indirect !== firstIndirect)) return null;
+  }
+  return matches[0];
+}
+function findEmbeddedStream(fontDescriptor) {
+  if (!fontDescriptor || fontDescriptor.isNull()) return null;
+  for (const key2 of ["FontFile", "FontFile2", "FontFile3"]) {
+    const ref = fontDescriptor.get(key2);
+    if (!ref.isNull() && ref.isStream()) return ref;
+  }
+  return null;
+}
+function embeddedFontHasCodePoints(mupdf2, fontDescriptor, baseFont, codePoints) {
+  const streamRef = findEmbeddedStream(fontDescriptor);
+  if (!streamRef) {
+    return !/^[A-Z]{6}\+/.test(baseFont);
+  }
+  const streamBytes = readStreamBytes(streamRef);
+  let font = null;
+  try {
+    font = new mupdf2.Font(baseFont, streamBytes);
+    for (const cp of codePoints) {
+      if (!(font.encodeCharacter(cp) > 0)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try {
+      font?.destroy();
+    } catch {
+    }
+  }
+}
+function byteForCodePoint(cp, toUnicode, encoding) {
+  const expectedNames = NUMERIC_GLYPHS[cp];
+  if (!expectedNames) return null;
+  if (toUnicode) {
+    const b = toUnicode.unicodeToByte.get(cp);
+    if (b === void 0 || b < 0 || b > 255) return null;
+    if (encoding.byteToGlyph.size) {
+      const gName = encoding.byteToGlyph.get(b);
+      if (!gName || !expectedNames.includes(gName)) return null;
+    }
+    return { byte: b, glyphName: encoding.byteToGlyph.get(b) || expectedNames[0] };
+  }
+  if (!encoding.byteToGlyph.size) return null;
+  let found = null;
+  for (const [b, gName] of encoding.byteToGlyph.entries()) {
+    if (!expectedNames.includes(gName)) continue;
+    if (found !== null) return null;
+    found = { byte: b, glyphName: gName };
+  }
+  return found;
+}
+function encodePdfBytes(bytes) {
+  const asciiSafe = bytes.every((b) => b >= 32 && b <= 126);
+  if (asciiSafe) {
+    let out = "(";
+    for (const b of bytes) {
+      if (b === 40 || b === 41 || b === 92) out += "\\" + String.fromCharCode(b);
+      else out += String.fromCharCode(b);
+    }
+    return out + ")";
+  }
+  return "<" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("") + ">";
+}
+function loadFontToUnicode(fontObj) {
+  const tuRef = fontObj.get("ToUnicode");
+  if (!tuRef || tuRef.isNull()) return { ok: true, map: null };
+  if (!tuRef.isStream()) return { ok: false, map: null };
+  const cmapText = new TextDecoder("latin1").decode(readStreamBytes(tuRef));
+  const map = parseSimpleToUnicode(cmapText);
+  return { ok: Boolean(map), map };
+}
+function widthForByte(widthsInfo, byte, fontSize) {
+  if (!widthsInfo) return 0;
+  const idx = byte - widthsInfo.firstChar;
+  const rawW = idx >= 0 && idx < widthsInfo.widths.length ? widthsInfo.widths[idx] : NaN;
+  return Number.isFinite(rawW) && rawW > 0 ? rawW / 1e3 * fontSize : NaN;
+}
+function encodeNumericText(text, toUnicode, encoding, charSet, widthsInfo, fontSize) {
+  const bytes = [];
+  const codePoints = [];
+  let totalWidth = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    const mapped = byteForCodePoint(cp, toUnicode, encoding);
+    if (!mapped || charSet && !charSet.has(mapped.glyphName)) return null;
+    const w = widthForByte(widthsInfo, mapped.byte, fontSize);
+    if (!Number.isFinite(w)) return null;
+    totalWidth += w;
+    bytes.push(mapped.byte);
+    codePoints.push(cp);
+  }
+  return bytes.length ? { bytes, codePoints, width: widthsInfo ? totalWidth : null } : null;
+}
+function resolveSourceFontEncoding(page, sourceFontName, text, fontSize, mupdf2) {
+  if (!page || !sourceFontName || !text || !(fontSize > 0) || !mupdf2) return null;
+  const match = findUniquePageFont(page, sourceFontName);
+  if (!match || !/^[A-Za-z0-9_.-]+$/.test(match.resName)) return null;
+  const { resName, fontObj } = match;
+  const tu = loadFontToUnicode(fontObj);
+  if (!tu.ok) return null;
+  const encoding = parseSimpleEncoding(fontObj);
+  const fontDescriptor = safeResolve(fontObj.get("FontDescriptor"));
+  const charSet = parseCharSet(fontDescriptor);
+  const widthsInfo = readWidths(fontObj);
+  const encoded = encodeNumericText(text, tu.map, encoding, charSet, widthsInfo, fontSize);
+  if (!encoded) return null;
+  if (!embeddedFontHasCodePoints(mupdf2, fontDescriptor, sourceFontName, encoded.codePoints)) return null;
+  return {
+    resName,
+    baseFont: sourceFontName,
+    bytes: encoded.bytes,
+    pdfLiteral: encodePdfBytes(encoded.bytes),
+    width: encoded.width
+  };
+}
+
+// src/browser-pdf.mjs
 var ENGINE = Object.freeze({
   name: "mupdf.js",
   version: "1.28.1",
@@ -789,12 +1074,22 @@ function locate(edit, index, models, pageCount, snapshot) {
   const chars = pool[0].chars;
   return buildLocatedPlan(edit, id, pageIndex, model, anchor, chars, snapshot, fail);
 }
+function tryLayoutSourceNumeric(plan, page, after) {
+  if (plan.supplied || !isSameLengthNumericReplacement(plan.edit.before, after)) return null;
+  const trimmed = after.trim();
+  const sourceRes = resolveSourceFontEncoding(page, plan.sourceFont, trimmed, plan.size, mupdf);
+  if (!sourceRes) return null;
+  if (sourceRes.width !== null && sourceRes.width > plan.hole + 0.8) return null;
+  return { lines: [trimmed], font: plan.sourceFont, substituted: false, encoding: "source-font", sourceResource: sourceRes };
+}
 function layout(plan, model, page) {
+  const after = plan.edit.after;
   const font = plan.supplied?.font || (plan.encoding === "uniks-utf16" ? cjkFont() : metrics(plan.face.name));
   const fontName = plan.supplied?.name || (plan.encoding === "uniks-utf16" ? "ko" : plan.face.name);
-  const after = plan.edit.after;
   const placed = (lines2) => ({ lines: lines2, font: fontName, substituted: plan.substituted, encoding: plan.encoding });
   if (!after) return placed([]);
+  const sourceLaid = tryLayoutSourceNumeric(plan, page, after);
+  if (sourceLaid) return sourceLaid;
   const width = measure(font, plan.size, after);
   if (width === null) return { error: "missing-glyphs" };
   if (width <= plan.hole + 0.8) return placed([after]);
@@ -893,6 +1188,13 @@ function redact(page, chars, protectedBoxes) {
 }
 function showText(doc, page, plan) {
   if (!plan.layout.lines.length) return "";
+  if (plan.layout.sourceResource) {
+    const [r2, g2, b2] = plan.color;
+    return `q BT /${plan.layout.sourceResource.resName} ${num(plan.size)} Tf ${num(r2)} ${num(g2)} ${num(b2)} rg
+1 0 0 1 ${num(plan.origin[0])} ${num(plan.origin[1])} Tm ${plan.layout.sourceResource.pdfLiteral} Tj
+ET Q
+`;
+  }
   const cjk = plan.layout.encoding === "uniks-utf16";
   const resource = plan.supplied ? ensureSnapshotFont(doc, page, plan) : cjk ? ensureCjkFont(doc, page) : ensureFont(doc, page, plan.layout.font);
   const [r, g, b] = plan.color;
@@ -2511,7 +2813,31 @@ function emitMultiSlotRewrite(doc, page, slots, text, baseName, cidState) {
   }
   return emitRewriteLinesOps(doc, page, items, baseName, cidState);
 }
-function emitRewriteEdit(doc, page, slots, rawNewText, cidState, rightOrigin = null) {
+function tryEmitSourceFontNumericRewrite(page, plan, rawNewText) {
+  if (!plan || plan.slots.length !== 1) return null;
+  const drawn = plan.selectedChars.filter((ch) => ch.c.trim());
+  if (!drawn.length) return null;
+  const fontName = drawn[0].fontName;
+  if (!fontName || drawn.some((ch) => ch.fontName !== fontName)) return null;
+  const origText = drawn.map((ch) => ch.c).join("");
+  const cleaned = sanitizeRewriteText(rawNewText).trim();
+  if (!isSameLengthNumericReplacement(origText, cleaned)) return null;
+  const slot = plan.slots[0];
+  const resolved = resolveSourceFontEncoding(page, fontName, cleaned, slot.size, mupdf);
+  if (!resolved) return null;
+  if (resolved.width !== null) {
+    if (slot.slotWidth > 0 && resolved.width > slot.slotWidth + 0.8) return null;
+    if (slot.pageAvailW > 0 && resolved.width > slot.pageAvailW) return null;
+  }
+  const [r, g, b] = slot.color || [0, 0, 0];
+  return `q BT
+${num(r)} ${num(g)} ${num(b)} rg 100 Tz ${num(slot.ux)} ${num(slot.uy)} ${num(-slot.uy)} ${num(slot.ux)} ${num(slot.ox)} ${num(slot.oy)} Tm /${resolved.resName} ${num(slot.size)} Tf ${resolved.pdfLiteral} Tj
+ET Q
+`;
+}
+function emitRewriteEdit(doc, page, slots, rawNewText, cidState, rightOrigin = null, plan = null) {
+  const sourceOps = tryEmitSourceFontNumericRewrite(page, plan, rawNewText);
+  if (sourceOps) return sourceOps;
   const sanitized = sanitizeRewriteText(rawNewText);
   const text = sanitized.replace(/^\n+|\n+$/g, "").replace(/[ ]*\n+[ ]*/g, " ");
   if (!text.trim() || !slots.length) return "";
@@ -2729,8 +3055,15 @@ function findLeftSibling(selectedChars, allChars, allSelectedSet, slot) {
   const lineId = drawn[0].lineId;
   const sameLine = survivingCharsOnLine(allChars, lineId, allSelectedSet);
   if (sameLine.length) return rightmostBeforeX(sameLine, slot.ox - 0.5);
-  const prevLine = survivingCharsOnLine(allChars, lineId - 1, allSelectedSet).filter((ch) => Math.abs(ch.pdfOrigin[1] - slot.oy) <= 1.5);
-  return rightmostBeforeX(prevLine, slot.ox - 0.5);
+  for (let prevId = lineId - 1; prevId >= 0; prevId--) {
+    const prevAll = allChars.filter((ch) => ch.lineId === prevId && ch.c.trim());
+    if (!prevAll.length) continue;
+    const onBaseline = prevAll.filter((ch) => Math.abs(ch.pdfOrigin[1] - slot.oy) <= 1.5);
+    if (!onBaseline.length) break;
+    const prevSurviving = onBaseline.filter((ch) => !allSelectedSet.has(ch));
+    if (prevSurviving.length) return rightmostBeforeX(prevSurviving, slot.ox - 0.5);
+  }
+  return null;
 }
 function findRightSibling(selectedChars, allChars, allSelectedSet, slot) {
   const drawn = horizontalEditDrawn(selectedChars, slot);
@@ -2768,8 +3101,9 @@ function findTjHolePart(show, slot, rightOrigin, measure2) {
 }
 function buildShowSplicePiece(latin1, show, holeEdits, postEdits) {
   const lm = show.lineMatrix.map(num).join(" ");
+  const orderedPost = [...postEdits].sort((a, b) => (a.slots[0]?.ox ?? 0) - (b.slots[0]?.ox ?? 0));
   if (!holeEdits.length) {
-    const ops = postEdits.map((it) => it.ops).join("");
+    const ops = orderedPost.map((it) => it.ops).join("");
     return { start: show.end, end: show.end, piece: ` ET
 ${ops}${restoreTextStateOps(show)}` };
   }
@@ -2785,9 +3119,9 @@ ${ops}${restoreTextStateOps(show)}` };
 ${cur.item.ops}${restoreTextStateOps(show, rightTm)}${seg}`;
   }
   piece += ` ${lm} Tm `;
-  if (postEdits.length) {
+  if (orderedPost.length) {
     piece += `ET
-${postEdits.map((it) => it.ops).join("")}${restoreTextStateOps(show)}`;
+${orderedPost.map((it) => it.ops).join("")}${restoreTextStateOps(show)}`;
   }
   return { start: show.start, end: show.end, piece };
 }
@@ -2891,7 +3225,7 @@ function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
     for (const plan of pagePlans) {
       const leftSibling = findLeftSibling(plan.selectedChars, model.chars, allSelectedSet, plan.slots[0]);
       const rightSibling = findRightSibling(plan.selectedChars, model.chars, allSelectedSet, plan.slots[0]);
-      const ops = emitRewriteEdit(doc, page, plan.slots, plan.newText, cidState, rightSibling);
+      const ops = emitRewriteEdit(doc, page, plan.slots, plan.newText, cidState, rightSibling, plan);
       if (ops) emitted.push({ slots: plan.slots, ops, leftSibling, rightSibling });
     }
     if (!emitted.length) return;

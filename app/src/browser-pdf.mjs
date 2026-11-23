@@ -6,6 +6,7 @@
 import * as mupdf from 'mupdf';
 import {parseFont, familyKey} from './browser-fonts.mjs';
 import {scanTextShows} from './paragraph-pdf-content-operators.mjs';
+import {isSameLengthNumericReplacement, resolveSourceFontEncoding} from './browser-pdf-source-font.mjs';
 
 export const ENGINE = Object.freeze({
   name: 'mupdf.js',
@@ -405,12 +406,23 @@ function locate(edit, index, models, pageCount, snapshot) {
   return buildLocatedPlan(edit, id, pageIndex, model, anchor, chars, snapshot, fail);
 }
 
+function tryLayoutSourceNumeric(plan, page, after) {
+  if (plan.supplied || !isSameLengthNumericReplacement(plan.edit.before, after)) return null;
+  const trimmed = after.trim();
+  const sourceRes = resolveSourceFontEncoding(page, plan.sourceFont, trimmed, plan.size, mupdf);
+  if (!sourceRes) return null;
+  if (sourceRes.width !== null && sourceRes.width > plan.hole + 0.8) return null;
+  return {lines: [trimmed], font: plan.sourceFont, substituted: false, encoding: 'source-font', sourceResource: sourceRes};
+}
+
 function layout(plan, model, page) {
+  const after = plan.edit.after;
   const font = plan.supplied?.font || (plan.encoding === 'uniks-utf16' ? cjkFont() : metrics(plan.face.name));
   const fontName = plan.supplied?.name || (plan.encoding === 'uniks-utf16' ? 'ko' : plan.face.name);
-  const after = plan.edit.after;
   const placed = (lines) => ({lines, font: fontName, substituted: plan.substituted, encoding: plan.encoding});
   if (!after) return placed([]);
+  const sourceLaid = tryLayoutSourceNumeric(plan, page, after);
+  if (sourceLaid) return sourceLaid;
   const width = measure(font, plan.size, after);
   if (width === null) return {error: 'missing-glyphs'};
   if (width <= plan.hole + 0.8) return placed([after]);
@@ -527,6 +539,11 @@ function redact(page, chars, protectedBoxes) {
  * The public anchor is never converted into this space. */
 function showText(doc, page, plan) {
   if (!plan.layout.lines.length) return '';
+  if (plan.layout.sourceResource) {
+    const [r, g, b] = plan.color;
+    return `q BT /${plan.layout.sourceResource.resName} ${num(plan.size)} Tf ${num(r)} ${num(g)} ${num(b)} rg\n` +
+      `1 0 0 1 ${num(plan.origin[0])} ${num(plan.origin[1])} Tm ${plan.layout.sourceResource.pdfLiteral} Tj\nET Q\n`;
+  }
   const cjk = plan.layout.encoding === 'uniks-utf16';
   const resource = plan.supplied ? ensureSnapshotFont(doc, page, plan) : cjk ? ensureCjkFont(doc, page) : ensureFont(doc, page, plan.layout.font);
   const [r, g, b] = plan.color;
@@ -2201,7 +2218,29 @@ function emitMultiSlotRewrite(doc, page, slots, text, baseName, cidState) {
   return emitRewriteLinesOps(doc, page, items, baseName, cidState);
 }
 
-function emitRewriteEdit(doc, page, slots, rawNewText, cidState, rightOrigin = null) {
+function tryEmitSourceFontNumericRewrite(page, plan, rawNewText) {
+  if (!plan || plan.slots.length !== 1) return null;
+  const drawn = plan.selectedChars.filter(ch => ch.c.trim());
+  if (!drawn.length) return null;
+  const fontName = drawn[0].fontName;
+  if (!fontName || drawn.some(ch => ch.fontName !== fontName)) return null;
+  const origText = drawn.map(ch => ch.c).join('');
+  const cleaned = sanitizeRewriteText(rawNewText).trim();
+  if (!isSameLengthNumericReplacement(origText, cleaned)) return null;
+  const slot = plan.slots[0];
+  const resolved = resolveSourceFontEncoding(page, fontName, cleaned, slot.size, mupdf);
+  if (!resolved) return null;
+  if (resolved.width !== null) {
+    if (slot.slotWidth > 0 && resolved.width > slot.slotWidth + 0.8) return null;
+    if (slot.pageAvailW > 0 && resolved.width > slot.pageAvailW) return null;
+  }
+  const [r, g, b] = slot.color || [0, 0, 0];
+  return `q BT\n${num(r)} ${num(g)} ${num(b)} rg 100 Tz ${num(slot.ux)} ${num(slot.uy)} ${num(-slot.uy)} ${num(slot.ux)} ${num(slot.ox)} ${num(slot.oy)} Tm /${resolved.resName} ${num(slot.size)} Tf ${resolved.pdfLiteral} Tj\nET Q\n`;
+}
+
+function emitRewriteEdit(doc, page, slots, rawNewText, cidState, rightOrigin = null, plan = null) {
+  const sourceOps = tryEmitSourceFontNumericRewrite(page, plan, rawNewText);
+  if (sourceOps) return sourceOps;
   const sanitized = sanitizeRewriteText(rawNewText);
   // '\n' in newText is a soft break: normalize newlines to single spaces so words reflow across slots
   const text = sanitized.replace(/^\n+|\n+$/g, '').replace(/[ ]*\n+[ ]*/g, ' ');
@@ -2436,9 +2475,15 @@ function findLeftSibling(selectedChars, allChars, allSelectedSet, slot) {
   const lineId = drawn[0].lineId;
   const sameLine = survivingCharsOnLine(allChars, lineId, allSelectedSet);
   if (sameLine.length) return rightmostBeforeX(sameLine, slot.ox - 0.5);
-  const prevLine = survivingCharsOnLine(allChars, lineId - 1, allSelectedSet)
-    .filter(ch => Math.abs(ch.pdfOrigin[1] - slot.oy) <= 1.5);
-  return rightmostBeforeX(prevLine, slot.ox - 0.5);
+  for (let prevId = lineId - 1; prevId >= 0; prevId--) {
+    const prevAll = allChars.filter(ch => ch.lineId === prevId && ch.c.trim());
+    if (!prevAll.length) continue;
+    const onBaseline = prevAll.filter(ch => Math.abs(ch.pdfOrigin[1] - slot.oy) <= 1.5);
+    if (!onBaseline.length) break;
+    const prevSurviving = onBaseline.filter(ch => !allSelectedSet.has(ch));
+    if (prevSurviving.length) return rightmostBeforeX(prevSurviving, slot.ox - 0.5);
+  }
+  return null;
 }
 
 function findRightSibling(selectedChars, allChars, allSelectedSet, slot) {
@@ -2480,8 +2525,9 @@ function findTjHolePart(show, slot, rightOrigin, measure) {
 
 function buildShowSplicePiece(latin1, show, holeEdits, postEdits) {
   const lm = show.lineMatrix.map(num).join(' ');
+  const orderedPost = [...postEdits].sort((a, b) => (a.slots[0]?.ox ?? 0) - (b.slots[0]?.ox ?? 0));
   if (!holeEdits.length) {
-    const ops = postEdits.map(it => it.ops).join('');
+    const ops = orderedPost.map(it => it.ops).join('');
     return {start: show.end, end: show.end, piece: ` ET\n${ops}${restoreTextStateOps(show)}`};
   }
   holeEdits.sort((a, b) => a.holePart.start - b.holePart.start);
@@ -2495,8 +2541,8 @@ function buildShowSplicePiece(latin1, show, holeEdits, postEdits) {
     piece += ` ET\n${cur.item.ops}${restoreTextStateOps(show, rightTm)}${seg}`;
   }
   piece += ` ${lm} Tm `;
-  if (postEdits.length) {
-    piece += `ET\n${postEdits.map(it => it.ops).join('')}${restoreTextStateOps(show)}`;
+  if (orderedPost.length) {
+    piece += `ET\n${orderedPost.map(it => it.ops).join('')}${restoreTextStateOps(show)}`;
   }
   return {start: show.start, end: show.end, piece};
 }
@@ -2602,7 +2648,7 @@ function applyRewritePage(doc, pageIndex, pageEdits, cidState) {
     for (const plan of pagePlans) {
       const leftSibling = findLeftSibling(plan.selectedChars, model.chars, allSelectedSet, plan.slots[0]);
       const rightSibling = findRightSibling(plan.selectedChars, model.chars, allSelectedSet, plan.slots[0]);
-      const ops = emitRewriteEdit(doc, page, plan.slots, plan.newText, cidState, rightSibling);
+      const ops = emitRewriteEdit(doc, page, plan.slots, plan.newText, cidState, rightSibling, plan);
       if (ops) emitted.push({slots: plan.slots, ops, leftSibling, rightSibling});
     }
     if (!emitted.length) return;

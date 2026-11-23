@@ -43,7 +43,7 @@ function inspectPage(pdfBytes, pageIndex) {
               const y0 = Math.min(quad[1], quad[3], quad[5], quad[7]);
               const x1 = Math.max(quad[0], quad[2], quad[4], quad[6]);
               const y1 = Math.max(quad[1], quad[3], quad[5], quad[7]);
-              const entry = {c, lineId, size, box: [x0, y0, x1, y1]};
+              const entry = {c, lineId, size, font: font.getName(), box: [x0, y0, x1, y1]};
               chars.push(entry);
               let arr = lines.get(lineId);
               if (!arr) { arr = []; lines.set(lineId, arr); }
@@ -1049,4 +1049,24 @@ test('fast mission PDF fuzzer: 8 pages x 15 words keeps every unedited word inta
     }
   }
   assert.equal(totalEdits, 120);
+});
+
+
+test('RAGAS table replacements retain the original numeric font and size', {skip: NO_MISSION}, async () => {
+  const pageIndex = 4;
+  const changes = [['0.95', '0.65'], ['0.78', '0.48']];
+  const hits = changes.map(([originalText, newText]) => {
+    const hit = findStructuredRects(missionBytes, pageIndex, originalText)[0];
+    assert.ok(hit);
+    return { pageIndex, rects: [hit.rect], originalText, newText, source: 'tap' };
+  });
+  const out = await rewrite(missionBytes, hits);
+  const before = inspectPage(missionBytes, pageIndex);
+  const after = inspectPage(out, pageIndex);
+  for (const [original, replacement] of changes) {
+    const originalCell = before.lines.find(line => line.text.trim() === original);
+    const revisedCell = after.lines.find(line => line.text.trim() === replacement);
+    assert.ok(originalCell && revisedCell, replacement);
+    assert.deepEqual(revisedCell.chars.map(ch => [ch.font, ch.size.toFixed(2)]), originalCell.chars.map(ch => [ch.font, ch.size.toFixed(2)]));
+  }
 });
