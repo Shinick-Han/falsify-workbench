@@ -52,7 +52,9 @@
     const hit=edits.find(e=>e.id===id);
     if(!hit) return null;
     if(String(newText)===hit.originalText){remove(id);return null;}
-    hit.newText=String(newText==null?'':newText);
+    const nextText=String(newText==null?'':newText);
+    if(nextText!==hit.newText&&hit.assist?.reason) hit.assist={...hit.assist,reason:''};
+    hit.newText=nextText;
     emit();
     return {...hit};
   }

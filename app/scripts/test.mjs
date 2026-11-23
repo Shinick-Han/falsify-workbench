@@ -42,6 +42,8 @@ const stale = [...exemptions.keys()].filter(f => !discovered.includes(f) || regi
 if (missing.length || stale.length) throw new Error(`Test registration mismatch: missing=${missing.join(', ')} stale exemptions=${stale.join(', ')}`);
 if (process.argv.includes('--check-registration')) { console.log(`Test registration: ${discovered.length} discovered, ${exemptions.size} explicit exemptions`); process.exit(0); }
 // BEGIN REGISTERED TESTS
+const w8 = spawnSync(process.execPath, ['--test', 'tests/w8-csv.spec.mjs', 'tests/w8-red-key.spec.mjs', 'tests/w8-event-design.spec.mjs', 'tests/w8-blue.spec.mjs', 'tests/w8-team.spec.cjs', 'tests/w8-paper-sync.spec.mjs', 'tests/w8-library.spec.mjs', 'tests/w8-history.spec.mjs', 'tests/w8-paper.unit.mjs'], {stdio:'inherit'});
+if (w8.error || w8.status !== 0) process.exit(w8.status || 1);
 if (ccn15Tests.length) {
   const result = spawnSync(process.execPath, ['--test', ...ccn15Tests.map(file => 'tests/' + file)], {stdio: 'inherit'});
   if (result.error || result.status !== 0) process.exit(result.status || 1);

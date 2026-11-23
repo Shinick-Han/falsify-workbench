@@ -40,7 +40,7 @@ jobs:
         working-directory: app
         run: |
           npm ci --ignore-scripts
-          npx playwright install chromium
+          npx playwright install --with-deps chromium webkit
       - name: Browser contracts
         working-directory: app
         run: |
@@ -61,6 +61,10 @@ jobs:
           node --test scripts/packaging.spec.mjs
           node --test scripts/event-page.spec.mjs
           node scripts/build-event-page.mjs --check
+          node scripts/build-workbench-page.mjs --check
+          node app/tests/w8-workbench.browser.cjs
+          W8_BROWSER=webkit node app/tests/w8-workbench.browser.cjs
+          node app/tests/w8-review.browser.cjs
           node --test scripts/build-booth-mission-text.spec.mjs
       - name: LaTeX source project browser regression (synthetic only)
         timeout-minutes: 15

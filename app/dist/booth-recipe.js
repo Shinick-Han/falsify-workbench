@@ -89,12 +89,17 @@
     checkText(errors,'agent.name',agent.name,{max:60,optional:true});
     checkText(errors,'agent.model',agent.model,{max:60,optional:true});
   }
+  function checkPaperId(errors, id){
+    if(isWorkbench()){
+      if(!id || id!==localPaper()?.id) errors.push({field:'paperId',code:'different_paper'});
+    }else if(typeof id!=='string'||!PAPER_ID.test(id)) errors.push({field:'paperId',code:'paper'});
+  }
   function checkTop(errors, obj){
     for(const key of Object.keys(obj)){
       if(!TOP_KEYS.has(key)) errors.push({field:key,code:'unknown'});
     }
     if(obj.schema!==undefined&&obj.schema!==SCHEMA) errors.push({field:'schema',code:'schema'});
-    if(typeof obj.paperId!=='string'||!PAPER_ID.test(obj.paperId)) errors.push({field:'paperId',code:'paper'});
+    checkPaperId(errors,obj.paperId);
     if(!SOURCES.includes(obj.source)) errors.push({field:'source',code:'source'});
     if(obj.defectType!==undefined&&!DEFECT_IDS.includes(obj.defectType)) errors.push({field:'defectType',code:'defect_type'});
     checkText(errors,'reason',obj.reason,{max:500,newline:true,optional:true});
@@ -536,6 +541,14 @@
     const idx=currentPageIndex();
     return Number.isInteger(idx)&&idx>=0?idx+1:0;
   }
+  function isWorkbench(){
+    return root.document?.documentElement?.dataset?.w8Workbench!==undefined;
+  }
+  function localPaper(){
+    const src=source();
+    if(!src?.fileHash) return null;
+    return {id:'local:'+src.fileHash,title:src.file.name,file:src.file};
+  }
   function boothCurrent(){
     const hook=boothPaper();
     try{return hook&&typeof hook.current==='function'?hook.current():null;}catch{return null;}
@@ -643,15 +656,12 @@
   }
   function indexedPages(){
     const pdf=pdfDocOf();
+    if(pdf) return indexCache.key===pdf?indexCache.pages:[];
     const src=source();
-    const key=pdf||(src&&(src.fileHash||src.file))||null;
+    const key=src&&(src.fileHash||src.file);
     if(key&&indexCache.key===key&&indexCache.pages.length) return indexCache.pages;
-    if(!pdf){
-      const fb=fallbackPagesFromSource(src);
-      if(fb.length) return fb;
-      return indexFromTextLayer();
-    }
-    return indexCache.pages;
+    const fb=fallbackPagesFromSource(src);
+    return fb.length?fb:indexFromTextLayer();
   }
   function workspaceOwnsPdf(){
     const ws=workspace();
@@ -796,6 +806,7 @@
     return same||isMission(paperId)?{}:await searchMeta(paperId);
   }
   async function ensurePaper(paperId){
+    if(isWorkbench()) return localPaper()?.id===paperId;
     const hook=boothPaper();
     if(!hook||typeof hook.open!=='function') return false;
     const same=sameOpenPaper(paperId);
@@ -843,6 +854,7 @@
   function recipeSourceMeta(clean){
     const editSource=clean.source==='my-ai'?'myai':'find';
     const assistMeta=clean.source==='my-ai'?{kind:'my-ai'}:undefined;
+    if(assistMeta&&isWorkbench()&&clean.reason) assistMeta.reason=clean.reason;
     return {editSource,assistMeta};
   }
   function applyRecipeEdits(clean, pages, progress){
@@ -870,6 +882,7 @@
     progress({phase:'paper',paperId:recipe.paperId});
     const opened=await ensurePaper(recipe.paperId);
     const pages=opened?await ensureIndex():[];
+    if(isWorkbench()&&localPaper()?.id!==recipe.paperId) throw invalidRecipe([{field:'paperId',code:'different_paper'}]);
     const outcome=opened&&pages.length
       ?applyRecipeEdits(recipe,pages,progress)
       :{applied:[],unresolved:recipe.edits.map(edit=>({edit,reason:'no_paper'}))};
@@ -885,13 +898,16 @@
     return hit?hit.text:'';
   }
   function paperInfo(){
-    const paper=boothCurrent();
+    const paper=isWorkbench()?localPaper():boothCurrent();
+    const hash=paper?.file?paper.id.slice(6):'';
+    const origin=hash?root.FalsifyW8Paper?.arxivForPaper(hash):null;
     const ws=workspace();
     const pages=indexedPages().length||(ws&&typeof ws.getPageCount==='function'?ws.getPageCount():0);
     return {
       paperId:paper&&paper.id||'',
-      title:paper&&paper.title||'',
-      license:paper&&paper.license||'',
+      title:origin?.title||paper?.title||'',
+      license:origin?.license||paper?.license||'',
+      ...(hash?{file:paper.file,fileHash:hash,arxivId:origin?.id||''}:{}),
       pages
     };
   }
@@ -1045,7 +1061,7 @@
       bar.append(button);
     }
     const section=el('section',{id:'booth-recipe',className:'booth-recipe','aria-label':'고치는 방법'},card,bar,panes.find,panes.myai);
-    const hint=doc.getElementById('booth-hint');
+    const hint=doc.getElementById('booth-hint')||doc.getElementById('w8-hint');
     if(hint) hint.after(section); else editStep.append(section);
 
     function mountMyAi(){
@@ -1104,8 +1120,7 @@
     }
     function fixRow(item, entry){
       const holder={};
-      const editSource=entry.recipe.source==='my-ai'?'myai':'find';
-      const assistMeta=entry.recipe.source==='my-ai'?{kind:'my-ai'}:undefined;
+      const {editSource,assistMeta}=recipeSourceMeta(entry.recipe);
       holder.view=findForm({
         row:true,find:item.edit.find,replace:item.edit.replace,source:editSource,assist:assistMeta,
         note:REASON_TEXT[item.reason]||REASON_TEXT.not_found,
@@ -1126,10 +1141,10 @@
       card.append(
         el('p',{className:'booth-lab',textContent:'RECIPE'}),
         el('h3',{id:'booth-recipe-count',className:'booth-recipe-count'}),
-        el('p',{className:'booth-small booth-recipe-by',textContent:byLine(entry)}),
-        el('p',{className:'booth-small',textContent:'바뀐 곳은 「다음」에서 원문과 함께 확인해요. 제출은 직접 해요.'}));
+        el('p',{className:'booth-small booth-recipe-by',textContent:byLine(entry)}));
+      if(!isWorkbench()) card.append(el('p',{className:'booth-small',textContent:'바뀐 곳은 「다음」에서 원문과 함께 확인해요. 제출은 직접 해요.'}));
       paintCount();
-      card.hidden=false;
+      card.hidden=isWorkbench()&&!out.unresolved.length;
       fix.textContent='';
       if(out.unresolved.length) fix.append(el('p',{className:'booth-klab',textContent:'확인 필요 · 바꿀 곳을 골라 주세요'}));
       for(const item of out.unresolved) fix.append(fixRow(item,entry));

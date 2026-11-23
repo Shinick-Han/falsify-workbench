@@ -1496,7 +1496,7 @@
         paintBeforeChanges();focusChange();
         pdfPage.cleanup&&pdfPage.cleanup();source.render=null;
         setBeforeStatus(n+' / '+pages+'쪽 · 원본 바이트'+(rotation?' · 회전된 쪽이라 좌표 편집은 받지 않습니다':''));
-        renderChrome();void drawAfter();if(editMode==='table')void inspectTables(pageText,mine,seq);else void inspectParagraphs(pageText,mine,seq);
+        renderChrome();emit('falsify:paper-workspace-page',{fileHash:source.fileHash,pageIndex:n-1,page:n,pages});void drawAfter();if(editMode==='table')void inspectTables(pageText,mine,seq);else void inspectParagraphs(pageText,mine,seq);
     }
     function beforePageReady(n,mine){
       if(!source||!source.doc||!Number.isSafeInteger(n)||n<1||n>pages||epoch!==mine)return false;
@@ -1606,6 +1606,7 @@
     }
     function renderParagraphs(display){
       const list=doc.createElement('details');list.className='paper-paragraph-list';list.open=eventBoothOpen();
+      if(doc.querySelector('#booth-pe-bar')&&!doc.querySelector('#booth'))list.hidden=true;
       const summary=doc.createElement('summary');summary.textContent='이 쪽의 문단 선택 ('+display.paragraphs.length+')';list.append(summary);
       const marker=doc.createElement('div');marker.className='paper-paragraph-marker';marker.hidden=true;marker.setAttribute('aria-hidden','true');display.pageEl.append(marker);
       const mark=p=>{

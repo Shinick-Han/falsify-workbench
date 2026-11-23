@@ -73,31 +73,6 @@
     rememberKey(params.get('k')||'');
     stripFragment(loc);
   }
-  function guestStoreKey(){return GUEST_PREFIX+apiBase();}
-  function guestFresh(data){
-    if(!data.expiresAt) return true;
-    const expires=Date.parse(data.expiresAt);
-    return !Number.isFinite(expires)||expires>Date.now();
-  }
-  function readGuest(){
-    const base=apiBase();
-    if(!base) return '';
-    let data=null;
-    try{data=JSON.parse(readItem(guestStoreKey())||'');}catch{return '';}
-    if(!data||data.apiBase!==base||typeof data.token!=='string'||!TOKEN_RE.test(data.token)) return '';
-    if(!guestFresh(data)) return '';
-    return data.token;
-  }
-  function writeGuest(token,expiresAt){
-    const base=apiBase();
-    if(!base||!TOKEN_RE.test(token)) return;
-    const record={apiBase:base,token,expiresAt:typeof expiresAt==='string'?expiresAt:''};
-    writeItem(guestStoreKey(),JSON.stringify(record));
-  }
-  function dropGuest(){
-    const base=apiBase();
-    if(base) removeItem(guestStoreKey());
-  }
   function guestPayload(){
     const key=storedKey();
     const body=key?JSON.stringify({accessKey:key}):'{}';
@@ -123,43 +98,71 @@
     if(wait) error.retryAfter=wait;
     return error;
   }
-  function acceptGuest(data){
-    const guest=data&&data.guest&&typeof data.guest==='object'?data.guest:null;
-    const token=guest&&typeof guest.token==='string'?guest.token:'';
-    const expiresAt=guest&&typeof guest.expiresAt==='string'?guest.expiresAt:'';
-    if(!TOKEN_RE.test(token)) return '';
-    writeGuest(token,expiresAt);
-    return token;
-  }
-  let flight=null;
-  let flightStamp=0;
-  async function requestGuest(stamp){
-    const base=apiBase();
-    if(!base||typeof root.fetch!=='function'||stamp!==flightStamp) return '';
-    let res=null;
-    try{
-      res=await root.fetch(base+'/v1/ai/guest',{
-        method:'POST',headers:{'Content-Type':'application/json'},body:guestPayload(),
-        credentials:'omit',redirect:'error',cache:'no-store',mode:'cors'
-      });
-    }catch{return '';}
-    if(stamp!==flightStamp) return '';
-    let data=null;
-    try{data=await res.json();}catch{data=null;}
-    if(stamp!==flightStamp) return '';
-    if(!res.ok) throw guestError(res,data);
-    return acceptGuest(data);
-  }
-  function invalidate(){flightStamp++;dropGuest();flight=null;}
-  async function token(){
-    const cached=readGuest();
-    if(cached) return cached;
-    if(!flight){
-      const stamp=flightStamp;
-      const run=requestGuest(stamp).finally(()=>{if(flight===run) flight=null;});
-      flight=run;
+  function createSession(baseOf,bodyOf){
+    function guestStoreKey(){return GUEST_PREFIX+baseOf();}
+    function guestFresh(data){
+      if(!data.expiresAt) return true;
+      const expires=Date.parse(data.expiresAt);
+      return !Number.isFinite(expires)||expires>Date.now();
     }
-    return flight;
+    function readGuest(){
+      const base=baseOf();
+      if(!base) return '';
+      let data=null;
+      try{data=JSON.parse(readItem(guestStoreKey())||'');}catch{return '';}
+      if(!data||data.apiBase!==base||typeof data.token!=='string'||!TOKEN_RE.test(data.token)) return '';
+      if(!guestFresh(data)) return '';
+      return data.token;
+    }
+    function writeGuest(token,expiresAt){
+      const base=baseOf();
+      if(!base||!TOKEN_RE.test(token)) return;
+      const record={apiBase:base,token,expiresAt:typeof expiresAt==='string'?expiresAt:''};
+      writeItem(guestStoreKey(),JSON.stringify(record));
+    }
+    function dropGuest(){
+      const base=baseOf();
+      if(base) removeItem(guestStoreKey());
+    }
+    function acceptGuest(data){
+      const guest=data&&data.guest&&typeof data.guest==='object'?data.guest:null;
+      const token=guest&&typeof guest.token==='string'?guest.token:'';
+      const expiresAt=guest&&typeof guest.expiresAt==='string'?guest.expiresAt:'';
+      if(!TOKEN_RE.test(token)) return '';
+      writeGuest(token,expiresAt);
+      return token;
+    }
+    let flight=null;
+    let flightStamp=0;
+    async function requestGuest(stamp){
+      const base=baseOf();
+      if(!base||typeof root.fetch!=='function'||stamp!==flightStamp) return '';
+      let res=null;
+      try{
+        res=await root.fetch(base+'/v1/ai/guest',{
+          method:'POST',headers:{'Content-Type':'application/json'},body:bodyOf(),
+          credentials:'omit',redirect:'error',cache:'no-store',mode:'cors'
+        });
+      }catch{return '';}
+      if(stamp!==flightStamp) return '';
+      let data=null;
+      try{data=await res.json();}catch{data=null;}
+      if(stamp!==flightStamp) return '';
+      if(!res.ok) throw guestError(res,data);
+      return acceptGuest(data);
+    }
+    function invalidate(){flightStamp++;dropGuest();flight=null;}
+    async function token(){
+      const cached=readGuest();
+      if(cached) return cached;
+      if(!flight){
+        const stamp=flightStamp;
+        const run=requestGuest(stamp).finally(()=>{if(flight===run) flight=null;});
+        flight=run;
+      }
+      return flight;
+    }
+    return {token,invalidate};
   }
   function markPage(){
     const doc=root.document;
@@ -228,7 +231,11 @@
     placeAfter('hosted-ai');
     placeInside('view-blue');
     watchCapabilities();
-    root.FalsifyHostedSession={token,invalidate};
+    const session=createSession(apiBase,guestPayload);
+    root.FalsifyHostedSession={...session,forBase(base){
+      if(base===apiBase()) return session;
+      return createSession(()=>base,()=>'{}');
+    }};
   }
   if(enabled()) install();
 })(typeof window==='object'?window:globalThis);

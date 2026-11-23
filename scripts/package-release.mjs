@@ -52,6 +52,8 @@ export function archiveCommittedSource(rootDir, commit, archive, version) {
 
 const forbidden = /(?:^|\/)(?:\.venv|\.local|node_modules|\.pdf-editor\.local\.json|\.runtime[^/]*|output|tmp)(?:\/|$)|^experiments\/|\.(?:pdf|docx|wav|mp3|wasm)$/i;
 const pdfjsWasm = new Set(PDFJS_WASM);
+const W8_EXAMPLE = 'app/dist/examples/seedling-growth.pdf';
+const W8_EXAMPLE_SHA256 = 'a9c0fafe56ba6dfff3180fbf534f1ce6c72d3c3262af7fd2c1aee85807786276';
 // Two-sentence synthetic handoff fixture; user papers remain excluded.
 const HANDOFF_FIXTURE = 'app/tests/fixtures/handoff-paper.pdf';
 const HANDOFF_FIXTURE_SHA256 = 'b518af142de7f30099d55a8125f9ae0e742ddefd403919106ed14b237822a275';
@@ -62,7 +64,7 @@ const MARKER_FIXTURE = 'app/tests/fixtures/paragraph-marker-synthetic.pdf';
 const MARKER_FIXTURE_SHA256 = 'a7d711cf5411ff14df9c9ec71a1ab276abd96ceac253bc41e7221c71360a116e';
 
 export function unexpectedReleasePaths(tracked) {
-  return tracked.filter(p => forbidden.test(p) && !pdfjsWasm.has(p) && p !== MUPDF_WASM && p !== RECOMPOSITION_WASM && p !== LATEX_WASM && p !== HANDOFF_FIXTURE && p !== PARAGRAPH_FIXTURE && p !== MARKER_FIXTURE && !PARAGRAPH_WASM.includes(p) && p !== 'experiments/selfplay_codex.py');
+  return tracked.filter(p => forbidden.test(p) && !pdfjsWasm.has(p) && p !== MUPDF_WASM && p !== RECOMPOSITION_WASM && p !== LATEX_WASM && ![HANDOFF_FIXTURE, W8_EXAMPLE].includes(p) && p !== PARAGRAPH_FIXTURE && p !== MARKER_FIXTURE && !PARAGRAPH_WASM.includes(p) && p !== 'experiments/selfplay_codex.py');
 }
 
 export function verifyLatexRuntime(rootDir) {
@@ -169,6 +171,7 @@ export function verifyVendoredMupdfWasm(rootDir) {
 export function assertShippableSource(tracked, rootDir) {
   const bad = unexpectedReleasePaths(tracked);
   if (bad.length) throw new Error(`Unexpected private/binary paths in source release: ${bad.join(', ')}`);
+  if (tracked.includes(W8_EXAMPLE) && createHash('sha256').update(readFileSync(join(rootDir, W8_EXAMPLE))).digest('hex') !== W8_EXAMPLE_SHA256) throw new Error('Synthetic W8 example digest mismatch.');
   if (tracked.includes(HANDOFF_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, HANDOFF_FIXTURE))).digest('hex') !== HANDOFF_FIXTURE_SHA256) throw new Error('Synthetic handoff fixture digest mismatch.');
   if (tracked.includes(PARAGRAPH_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, PARAGRAPH_FIXTURE))).digest('hex') !== PARAGRAPH_FIXTURE_SHA256) throw new Error('Synthetic paragraph fixture digest mismatch.');
   if (tracked.includes(MARKER_FIXTURE) && createHash('sha256').update(readFileSync(join(rootDir, MARKER_FIXTURE))).digest('hex') !== MARKER_FIXTURE_SHA256) throw new Error('Synthetic marker fixture digest mismatch.');

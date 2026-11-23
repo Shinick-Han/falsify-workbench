@@ -45,3 +45,134 @@ test('red exchange handles structured tableEdits/visualEdits and gates visual pr
   assert.equal(batch.items[1].kind,'chart-point');
   assert.equal(batch.items[1].visualTarget.afterValue,15);
 });
+
+test('FLS-18 official B표 Markdown preserves each row, 1-based physical page, and ignores A0/D-1/D-2 tables',()=>{
+  const docSegments=[
+    {id:'p1-b0',pageIndex:0,label:'PDF p. 1',text:'The synthetic cohort total was 420 units across three sites.'},
+    {id:'p2-b0',pageIndex:1,label:'PDF p. 2',text:'Table 1 lists 160, 140, and 100 units (sum 400).'}
+  ];
+  const raw=[
+    '## A0. 실행 정보',
+    '| 참가자 | 조건(A 공통 / B 자유) | 사용 서비스·도구 | 모델명과 버전 |',
+    '|---|---|---|---|',
+    '| 테스터 | A | 웹 채팅 | synth-model-1 |',
+    '',
+    '## B. 결함 및 확인필요 후보',
+    'ID | 물리 페이지 | 위치(절·그림·표) | 유형 | 판정(아님/확인필요) | 심각도 | 정확한 원문 인용 | 대응 근거·이유·검산(원문/그림판독/가정 구분) | 확신 | 추가로 필요한 정보',
+    '---|---|---|---|---|---|---|---|---|---',
+    'F-1 | 1 (인쇄 101) | Results · Table 1 | D1 | 아님 | 되돌리지 않으면 공개할 수 없음 | The synthetic cohort total was 420 units | 원문 표 1 합계는 400(160+140+100)으로 본문 420과 불일치 | 높음 | 없음',
+    'F-2 | 2쪽 | Table 1 각주 | D2 | 확인필요 | 미정—필요 근거 | Table 1 lists 160, 140, and 100 units | 외부 등록부 확인 필요 | 보통 | 프로토콜 원문 필요',
+    'F-3 | 해당 없음 | Discussion | D3 | 맞음 | 가벼움 | | 별도 점검으로 해소된 항목 | 낮음 | 해당 없음',
+    '',
+    '## D-1 페이지·표 확인표',
+    '| 물리 페이지 | 표·그림·참고문헌 등의 대상 | 확인 수단 | 실제 수행한 대조 | 미확인 영역·제약 | 관련 후보 ID |',
+    '|---|---|---|---|---|---|',
+    '| 1 | Table 1 | 추출 텍스트 | 합계 검산 | 없음 | F-1 |'
+  ].join('\n');
+  const b=X.parse(raw,{role:'blue',segments:docSegments,fileHash:'hash'});
+  assert.equal(b.status,'ok');
+  assert.equal(b.items.length,3);
+  assert.equal(b.items[0].reportNumber,'F-1');
+  assert.equal(b.items[0].pageIndex,0);
+  assert.equal(b.items[0].locationLabel,'Results · Table 1');
+  assert.equal(b.items[0].findingType,'D1');
+  assert.equal(b.items[0].verdictLabel,'아님');
+  assert.equal(b.items[0].severity,'되돌리지 않으면 공개할 수 없음');
+  assert.equal(b.items[0].quote,'The synthetic cohort total was 420 units');
+  assert.equal(b.items[0].matchStatus,'matched');
+  assert.equal(b.items[0].confidence,'높음');
+  assert.equal(b.items[0].uncertainty,'없음');
+  assert.equal(b.items[1].reportNumber,'F-2');
+  assert.equal(b.items[1].pageIndex,1);
+  assert.equal(b.items[1].verdictLabel,'확인필요');
+  assert.equal(b.items[1].uncertainty,'프로토콜 원문 필요');
+  assert.equal(b.items[2].reportNumber,'F-3');
+  assert.equal(b.items[2].pageIndex,null);
+  assert.equal(b.items[2].verdictLabel,'맞음');
+  assert.match(b.report,/D-1 페이지·표 확인표/);
+});
+
+test('FLS-18 15-column RFC 4180 CSV handles BOM, quoted commas/newlines, structured evidence, and metadata',()=>{
+  const docSegments=[
+    {id:'p1-b0',pageIndex:0,label:'PDF p. 1',text:'Alpha, "beta"\nline two sample text.'},
+    {id:'p3-b0',pageIndex:2,label:'PDF p. 3',text:'Table 2 shows 15.6% vs 21%.'}
+  ];
+  const header='참가자,조건,탐지기,모델,실행번호,ID,물리 페이지,위치(절·그림·표),유형,판정(아님/확인필요),심각도,정확한 원문 인용,대응 근거·이유·검산,확신,추가로 필요한 정보';
+  const row1='테스터,B,내 AI,synth-model-2,1,F-1,1,"Section 2, ""Results""",D1,아님,가벼움,"Alpha, ""beta""\nline two","요약 이유, 검산 포함\n[근거 1] 표 1 비교 | 인용: Table 1, row 2\n[참고] PDF p.3 Table 2",높음,"원자료, 부록 필요"';
+  const row2='테스터,B,내 AI,synth-model-2,1,F-2,3,Table 2,D1,확인필요,미정—필요 근거,Table 2 shows 15.6% vs 21%.,수치 재확인 필요,보통,없음';
+  const raw='\uFEFF'+[header,row1,row2].join('\r\n')+'\r\n';
+  const b=X.parse(raw,{role:'blue',segments:docSegments,fileHash:'hash'});
+  assert.equal(b.status,'ok');
+  assert.equal(b.model,'synth-model-2');
+  assert.equal(b.condition,'B');
+  assert.equal(b.items.length,2);
+  assert.equal(b.items[0].reportNumber,'F-1');
+  assert.equal(b.items[0].pageIndex,0);
+  assert.equal(b.items[0].locationLabel,'Section 2, "Results"');
+  assert.equal(b.items[0].quote,'Alpha, "beta"\nline two');
+  assert.equal(b.items[0].matchStatus,'matched');
+  assert.equal(b.items[0].rationale,'요약 이유, 검산 포함');
+  assert.deepEqual(b.items[0].evidence,[{relation:'표 1 비교',quote:'Table 1, row 2'}]);
+  assert.deepEqual(b.items[0].references,['PDF p.3 Table 2']);
+  assert.equal(b.items[0].uncertainty,'원자료, 부록 필요');
+  assert.equal(b.items[1].reportNumber,'F-2');
+  assert.equal(b.items[1].pageIndex,2);
+  assert.equal(b.items[1].matchStatus,'matched');
+});
+
+test('mixed report with B표 Markdown and repeated fenced/embedded CSV reconciles without double-counting',()=>{
+  const docSegments=[
+    {id:'p1-b0',pageIndex:0,label:'PDF p. 1',text:'Alpha, beta\nsecond line total 420.'},
+    {id:'p2-b0',pageIndex:1,label:'PDF p. 2',text:'Control group n=50.'}
+  ];
+  const mixed=[
+    '## B. 결함 및 확인필요 후보',
+    '| ID | 물리 페이지 | 위치(절·그림·표) | 유형 | 판정(아님/확인필요) | 심각도 | 정확한 원문 인용 | 대응 근거·이유·검산(원문/그림판독/가정 구분) | 확신 | 추가로 필요한 정보 |',
+    '|---|---|---|---|---|---|---|---|---|---|',
+    '| F-1 | 1 | Section 1 | D1 | 아님 | 가벼움 | Alpha, beta second line total 420. | 표 합계와 다름 | 높음 | 원자료 필요 |',
+    '| F-2 | 2 | Methods | D3 | 확인필요 | 미정—필요 근거 | Control group n=50. | 표본 수 확인 필요 | 보통 | 프로토콜 |',
+    '',
+    '## CSV',
+    '```csv',
+    '참가자,조건,탐지기,모델,실행번호,ID,물리 페이지,위치(절·그림·표),유형,판정(아님/확인필요),심각도,정확한 원문 인용,대응 근거·이유·검산,확신,추가로 필요한 정보',
+    '테스터,A,내 AI,synth-model-3,1,F-1,1,"Section 1, para 2",D1,아님,가벼움,"Alpha, beta\nsecond line total 420.","표 합계와 다름, 검산=400",높음,',
+    '테스터,A,내 AI,synth-model-3,1,F-2,2,Methods,D3,확인필요,미정—필요 근거,Control group n=50.,표본 수 확인 필요,보통,프로토콜',
+    '```'
+  ].join('\n');
+  const b=X.parse(mixed,{role:'blue',segments:docSegments,fileHash:'hash'});
+  assert.equal(b.items.length,2,'repeated CSV must not double-count B표 rows');
+  assert.equal(b.model,'synth-model-3');
+  assert.equal(b.condition,'A');
+  assert.equal(b.items[0].quote,'Alpha, beta\nsecond line total 420.','CSV multiline quote preserved');
+  assert.equal(b.items[0].locationLabel,'Section 1, para 2');
+  assert.equal(b.items[0].uncertainty,'원자료 필요','missing CSV field backfilled from Markdown row');
+  assert.equal(b.items[1].reportNumber,'F-2');
+
+  const jsonAliases=X.parse(JSON.stringify({
+    findings:[{id:'J-1',page:1,location:'Results',defect_type:'D1',verdict:'아님',reason:'Alias reason',confidence:0.85,quote:'Control group n=50.'}]
+  }),{role:'blue',segments:docSegments,fileHash:'hash'});
+  assert.equal(jsonAliases.items.length,1);
+  assert.equal(jsonAliases.items[0].locationLabel,'Results');
+  assert.equal(jsonAliases.items[0].findingType,'D1');
+  assert.equal(jsonAliases.items[0].verdictLabel,'아님');
+  assert.equal(jsonAliases.items[0].rationale,'Alias reason');
+  assert.equal(jsonAliases.items[0].confidence,'0.85');
+
+  const unfencedMixed=[
+    '## B. 결함 및 확인필요 후보',
+    '| ID | 물리 페이지 | 위치(절·그림·표) | 유형 | 판정(아님/확인필요) | 심각도 | 정확한 원문 인용 | 대응 근거·이유·검산(원문/그림판독/가정 구분) | 확신 | 추가로 필요한 정보 |',
+    '|---|---|---|---|---|---|---|---|---|---|',
+    '| F-1 | 1 | Section 1 | D1 | 아님 | 가벼움 | Alpha, beta second line total 420. | 표 합계와 다름 | 높음 | 없음 |',
+    '',
+    'ID,물리 페이지,위치(절·그림·표),유형,판정(아님/확인필요),심각도,정확한 원문 인용,대응 근거·이유·검산,확신,추가로 필요한 정보',
+    'F-1,1,Section 1,D1,아님,가벼움,"Alpha, beta\nsecond line total 420.","표 합계와 다름",높음,없음',
+    'F-3,2,Methods,D2,확인필요,미정—필요 근거,Control group n=50.,추가 확인 항목,보통,등록부',
+    '',
+    '## C. 별도 점검 기록',
+    '정상 항목 기록'
+  ].join('\n');
+  const u=X.parse(unfencedMixed,{role:'blue',segments:docSegments,fileHash:'hash'});
+  assert.equal(u.items.length,2,'unfenced embedded CSV deduplicates F-1 and keeps unique F-3 without absorbing trailing heading');
+  assert.equal(u.items[0].reportNumber,'F-1');
+  assert.equal(u.items[1].reportNumber,'F-3');
+});

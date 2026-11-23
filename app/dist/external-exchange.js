@@ -49,8 +49,100 @@
   }
   function json(raw){const text=raw.trim().replace(/^\uFEFF/,'');try{return JSON.parse(text);}catch{}const fence=/```(?:json)?\s*\n([\s\S]*?)```/i.exec(text);if(fence){try{return JSON.parse(fence[1]);}catch{}}return null;}
   const tableCells=line=>line.trim().replace(/^\|/,'').replace(/\|$/,'').split(/(?<!\\)\|/).map(x=>x.trim().replace(/\\\|/g,'|'));
-  const sepLine=line=>/^\s*\|?[\s:|\-]+\|?\s*$/.test(line||'');
-  const parsePageNum=v=>{const m=/^\s*(\d+)\s*(?:쪽|p(?:age)?\.?)?\s*$/i.exec(v||'');return m?Number(m[1]):undefined;};
+  const sepLine=line=>/^\s*\|?[\s:|\-]+\|?\s*$/.test(line||'')&&line.includes('-');
+  function parsePageNum(v){
+    if(typeof v==='number')return Number.isInteger(v)&&v>0&&v<=100000?v:undefined;
+    const text=String(v||'').trim();
+    if(!text)return undefined;
+    const m=/^(?:PDF\s*)?(?:p(?:age)?\.?\s*)?(\d{1,5})(?:\s*(?:쪽|p(?:age)?\.?))?(?:\s*[\(\[\/|,·].*)?$/i.exec(text);
+    if(!m)return undefined;
+    const n=Number(m[1]);
+    return Number.isInteger(n)&&n>0&&n<=100000?n:undefined;
+  }
+  const normHeader=text=>String(text||'').replace(/^\uFEFF/,'').replace(/\s+/g,'').replace(/[·・･∙]/g,'·').toLowerCase();
+  const normCompare=text=>String(text||'').replace(/\s+/g,' ').trim().toLowerCase();
+  function findHeader(headers,match){return headers.findIndex(match);}
+  function isEvidenceHeader(h){
+    return h==='왜결함인가'||h==='대응근거·이유·검산'||h.startsWith('대응근거·이유·검산(')||h==='대응근거,이유,검산'||h.startsWith('대응근거,이유,검산(');
+  }
+  function isLocationHeader(h){
+    return h==='위치(절·그림·표)'||h==='위치(절,그림,표)'||h==='위치(절/그림/표)'||h==='위치';
+  }
+  function findingHeaderIndices(header){
+    const h=header.map(normHeader);
+    const cols={
+      id:findHeader(h,x=>x==='id'||x==='번호'),
+      page:findHeader(h,x=>x==='물리페이지'||x==='쪽'||x==='페이지'||x==='pdf쪽'),
+      location:findHeader(h,isLocationHeader),
+      type:findHeader(h,x=>x==='유형'||x==='결함유형'),
+      verdict:findHeader(h,x=>x==='판정'||x.startsWith('판정(')),
+      severity:findHeader(h,x=>x==='심각도'),
+      quote:findHeader(h,x=>x==='정확한원문인용'||x==='인용한원문'||x==='원문인용'),
+      evidence:findHeader(h,isEvidenceHeader),
+      confidence:findHeader(h,x=>x==='확신'||x==='확신도'),
+      uncertainty:findHeader(h,x=>x==='추가로필요한정보'||x==='추가필요정보'),
+      model:findHeader(h,x=>x==='모델'),
+      condition:findHeader(h,x=>x==='조건')
+    };
+    const core=[cols.id,cols.page,cols.location,cols.type,cols.quote,cols.evidence,cols.confidence];
+    if(core.some(n=>n<0)||(cols.severity<0&&cols.verdict<0))return null;
+    return cols;
+  }
+  function parseEvidenceMarkerLine(body){
+    const split=/^(.*?)\s*\|\s*인용:\s*([\s\S]+)$/.exec(body);
+    if(split)return {relation:split[1].trim(),quote:split[2].trim()};
+    const qOnly=/^인용:\s*([\s\S]+)$/.exec(body);
+    if(qOnly)return {relation:'',quote:qOnly[1].trim()};
+    return body.trim();
+  }
+  function appendEvidenceContinuation(list,line){
+    const last=list[list.length-1];
+    if(typeof last==='string')list[list.length-1]=last+'\n'+line;
+    else if(last.quote)last.quote+='\n'+line;
+    else last.relation+='\n'+line;
+  }
+  function parseEvidenceCellText(rawText){
+    const text=String(rawText||'');
+    if(!/(?:^|\n)\[(?:근거(?:\s+\d+)?|참고(?:\s+\d+)?)\]/.test(text))return {rationale:text,evidence:[],references:[]};
+    const rationaleLines=[],evidenceList=[],refList=[];
+    let active='';
+    for(const line of text.split(/\r?\n/)){
+      const ev=/^\[근거(?:\s+\d+)?\]\s*(.*)$/.exec(line);
+      if(ev){active='ev';const parsed=parseEvidenceMarkerLine(ev[1]);if(parsed)evidenceList.push(parsed);continue;}
+      const ref=/^\[참고(?:\s+\d+)?\]\s*(.*)$/.exec(line);
+      if(ref){active='ref';if(ref[1].trim())refList.push(ref[1].trim());continue;}
+      if(active==='ev'&&evidenceList.length)appendEvidenceContinuation(evidenceList,line);
+      else if(active==='ref'&&refList.length)refList[refList.length-1]+='\n'+line;
+      else rationaleLines.push(line);
+    }
+    return {rationale:rationaleLines.join('\n').trim(),evidence:evidenceList,references:refList};
+  }
+  function cellAt(row,idx){return idx>=0&&idx<row.length?String(row[idx]??''):'';}
+  function mapFindingRow(row,cols){
+    const ev=parseEvidenceCellText(cellAt(row,cols.evidence));
+    const sevRaw=cols.severity>=0?cellAt(row,cols.severity):cellAt(row,cols.verdict);
+    const entry={
+      reportNumber:cellAt(row,cols.id).trim(),
+      page:parsePageNum(cellAt(row,cols.page)),
+      locationLabel:cellAt(row,cols.location).trim(),
+      findingType:cellAt(row,cols.type).trim(),
+      severity:sevRaw.trim(),
+      quote:cellAt(row,cols.quote),
+      rationale:ev.rationale,
+      confidence:cellAt(row,cols.confidence).trim()
+    };
+    if(ev.evidence.length)entry.evidence=ev.evidence;
+    if(ev.references.length)entry.references=ev.references;
+    if(cols.verdict>=0)entry.verdictLabel=cellAt(row,cols.verdict).trim();
+    if(cols.uncertainty>=0)entry.uncertainty=cellAt(row,cols.uncertainty);
+    return entry;
+  }
+  function collectUniformMeta(rows,idx){
+    if(idx<0)return '';
+    const values=new Set();
+    for(const row of rows){const v=cellAt(row,idx).trim();if(v)values.add(v);}
+    return values.size===1?[...values][0]:'';
+  }
   function readTableRows(lines,startRow,headerLen,mapRow){
     const entries=[],malformed=[];let j=startRow;const fenced=startRow>=3&&/^\s*`{3,}(?:\w+)?\s*$/.test(lines[startRow-3]);
     for(;j<lines.length;j++){if(!lines[j].includes('|')||!lines[j].trim())break;const row=tableCells(lines[j]);if(row.length<headerLen){malformed.push(j+1);continue;}entries.push(mapRow(row));}
@@ -68,31 +160,149 @@
     }
     return null;
   }
-  function stage2HeaderIndices(header){
-    const h=header.map(x=>x.replace(/\s/g,''));
-    const base=['번호','쪽','위치(절,그림,표)','유형','인용한원문','왜결함인가','확신'].map(n=>h.indexOf(n));
-    if(base.some(n=>n<0))return null;
-    const sevIdx=h.indexOf('심각도'),verIdx=h.indexOf('판정');
-    if(sevIdx<0&&verIdx<0)return null;
-    return {base,sevIdx:sevIdx>=0?sevIdx:verIdx,verIdx};
-  }
   function markdownFindings(raw){
     const lines=raw.split(/\r?\n/),stage1=markdownStage1(lines),startAt=stage1?stage1.endLine:0;
     for(let i=startAt;i+1<lines.length;i++){
       if(!sepLine(lines[i+1]))continue;
-      const header=tableCells(lines[i]),idx=stage2HeaderIndices(header);if(!idx)continue;
-      const res=readTableRows(lines,i+2,header.length,row=>{
-        const b=idx.base.map(n=>row[n]),entry={reportNumber:b[0],page:parsePageNum(b[1]),locationLabel:b[2],findingType:b[3],severity:row[idx.sevIdx],quote:b[4],rationale:b[5],confidence:b[6]};
-        if(idx.verIdx>=0)entry.verdictLabel=row[idx.verIdx];
-        return entry;
-      });
+      const header=tableCells(lines[i]),cols=findingHeaderIndices(header);if(!cols)continue;
+      const rawRows=[];
+      const res=readTableRows(lines,i+2,header.length,row=>{rawRows.push(row);return mapFindingRow(row,cols);});
+      const meta={model:collectUniformMeta(rawRows,cols.model),condition:collectUniformMeta(rawRows,cols.condition)};
       if(stage1&&getSensor()?.reconcileCandidateLedger){
         const rec=getSensor().reconcileCandidateLedger(stage1.entries,res.entries);
-        return {entries:rec.findings,malformed:res.malformed,report:lines.slice(res.endLine).join('\n').trim(),zeroDropSummary:rec.summary};
+        return {entries:rec.findings,malformed:res.malformed,report:lines.slice(res.endLine).join('\n').trim(),zeroDropSummary:rec.summary,meta};
       }
-      if(res.entries.length)return {entries:res.entries,malformed:res.malformed,report:lines.slice(res.endLine).join('\n').trim()};
+      if(res.entries.length)return {entries:res.entries,malformed:res.malformed,report:lines.slice(res.endLine).join('\n').trim(),meta};
     }
     return null;
+  }
+  function isCsvProseStop(stopOnProse,rows,row){
+    return stopOnProse&&rows.length&&row.length===1&&/^(?:#{1,6}\s|```|---+$)/.test(row[0].trim());
+  }
+  function stepQuotedCsv(src,i,st){
+    const ch=src[i];
+    if(ch==='"'&&src[i+1]==='"'){st.cell+='"';return i+1;}
+    if(ch==='"'){st.inQuotes=false;return i;}
+    if(ch==='\n')st.lineNum++;
+    st.cell+=ch;
+    return i;
+  }
+  function commitCsvLine(st,stopOnProse){
+    st.row.push(st.cell);
+    const blank=st.row.length===1&&!st.row[0].trim();
+    if(blank){st.row=[];st.cell='';return false;}
+    if(isCsvProseStop(stopOnProse,st.rows,st.row))return true;
+    st.rows.push({cells:st.row,line:st.rowStart});
+    st.row=[];st.cell='';
+    return false;
+  }
+  function parseCsvRecords(text,stopOnProse){
+    const src=String(text||'').replace(/^\uFEFF/,'');
+    const st={rows:[],row:[],cell:'',inQuotes:false,lineNum:1,rowStart:1};
+    for(let i=0;i<src.length;i++){
+      if(st.inQuotes){i=stepQuotedCsv(src,i,st);continue;}
+      const ch=src[i];
+      if(ch==='"'&&!st.cell){st.inQuotes=true;continue;}
+      if(ch===','){st.row.push(st.cell);st.cell='';continue;}
+      if(ch==='\r'||ch==='\n'){
+        if(ch==='\r'&&src[i+1]==='\n')i++;
+        if(commitCsvLine(st,stopOnProse))return {rows:st.rows,unclosed:false};
+        st.lineNum++;st.rowStart=st.lineNum;
+        continue;
+      }
+      st.cell+=ch;
+    }
+    if(st.inQuotes)return {rows:st.rows,unclosed:true,unclosedLine:st.rowStart};
+    if(st.cell.length||st.row.length)commitCsvLine(st,false);
+    return {rows:st.rows,unclosed:false};
+  }
+  function buildCsvResult(parsed,cols,headerLen){
+    const entries=[],malformed=[],rawRows=[];
+    for(let i=1;i<parsed.rows.length;i++){
+      const r=parsed.rows[i];
+      if(r.cells.length<headerLen){malformed.push(r.line);continue;}
+      rawRows.push(r.cells);
+      entries.push(mapFindingRow(r.cells,cols));
+    }
+    if(parsed.unclosed)malformed.push(parsed.unclosedLine||parsed.rows.length+1);
+    if(!entries.length&&!malformed.length)return null;
+    return {entries,malformed,meta:{model:collectUniformMeta(rawRows,cols.model),condition:collectUniformMeta(rawRows,cols.condition)}};
+  }
+  function parseCsvCandidate(text,stopOnProse){
+    const parsed=parseCsvRecords(text,stopOnProse);
+    if(!parsed.rows.length)return null;
+    const cols=findingHeaderIndices(parsed.rows[0].cells);
+    return cols?buildCsvResult(parsed,cols,parsed.rows[0].cells.length):null;
+  }
+  function findEmbeddedCsvStart(raw){
+    const lines=raw.split(/\r?\n/);let inFence=false,offset=0;
+    for(let i=0;i<lines.length;i++){
+      const line=lines[i];
+      if(/^\s*`{3,}/.test(line)){inFence=!inFence;offset+=line.length+1;continue;}
+      if(!inFence&&line.includes(',')&&!line.trim().startsWith('|')){
+        const head=parseCsvRecords(line,false).rows[0]?.cells;
+        if(head&&findingHeaderIndices(head))return offset;
+      }
+      offset+=line.length+1;
+    }
+    return -1;
+  }
+  function csvFindings(raw){
+    const direct=parseCsvCandidate(raw,false);
+    if(direct)return direct;
+    const fenceRe=/```([^\n`]*)\n([\s\S]*?)```/g;
+    let match;
+    while((match=fenceRe.exec(raw))){
+      const info=match[1].trim().toLowerCase();
+      if(info&&info!=='csv'&&info!=='text'&&info!=='txt')continue;
+      const res=parseCsvCandidate(match[2],false);
+      if(res)return res;
+    }
+    const at=findEmbeddedCsvStart(raw);
+    return at>=0?parseCsvCandidate(raw.slice(at),true):null;
+  }
+  function uniqueReportIdSet(entries){
+    const counts=new Map();
+    for(const e of entries){const k=normCompare(e.reportNumber);if(k)counts.set(k,(counts.get(k)||0)+1);}
+    return new Set([...counts.entries()].filter(([,n])=>n===1).map(([k])=>k));
+  }
+  function entryMatchesPair(a,b,uniqueA,uniqueB){
+    const idA=normCompare(a.reportNumber),idB=normCompare(b.reportNumber);
+    if(idA&&idA===idB&&uniqueA.has(idA)&&uniqueB.has(idB))return true;
+    const qA=normCompare(a.quote),qB=normCompare(b.quote);
+    const rA=normCompare(a.rationale),rB=normCompare(b.rationale);
+    if(a.page!==b.page)return false;
+    if(qA&&qA===qB)return true;
+    return !qA&&!qB&&!!rA&&rA===rB;
+  }
+  function mergeSingleEntry(primary,fallback){
+    const out={...primary};
+    for(const k of ['reportNumber','locationLabel','findingType','verdictLabel','severity','quote','rationale','confidence','uncertainty']){
+      if(!out[k]&&fallback[k])out[k]=fallback[k];
+    }
+    if(out.page===undefined&&fallback.page!==undefined)out.page=fallback.page;
+    if(!out.evidence?.length&&fallback.evidence?.length)out.evidence=fallback.evidence;
+    if(!out.references?.length&&fallback.references?.length)out.references=fallback.references;
+    return out;
+  }
+  function mergeTableAndCsv(md,csv){
+    if(!md)return csv;
+    if(!csv)return md;
+    const uniqueMd=uniqueReportIdSet(md.entries),uniqueCsv=uniqueReportIdSet(csv.entries);
+    const usedMd=new Set(),merged=[];
+    for(const c of csv.entries){
+      const hit=md.entries.findIndex((m,i)=>!usedMd.has(i)&&entryMatchesPair(c,m,uniqueCsv,uniqueMd));
+      if(hit>=0){usedMd.add(hit);merged.push(mergeSingleEntry(c,md.entries[hit]));}
+      else merged.push(c);
+    }
+    md.entries.forEach((m,i)=>{if(!usedMd.has(i))merged.push(m);});
+    return {
+      entries:merged,
+      malformed:[...(md.malformed||[]),...(csv.malformed||[])],
+      report:md.report||'',
+      zeroDropSummary:md.zeroDropSummary,
+      meta:{model:csv.meta?.model||md.meta?.model||'',condition:csv.meta?.condition||md.meta?.condition||''}
+    };
   }
   function canUseRedFallback(role,segments,options){
     return role==='red'&&red&&(segments.length||Array.isArray(options.tables)||Array.isArray(options.figures));
@@ -114,7 +324,7 @@
     return batch;
   }
   function copyBatchOptions(options,batch){
-    for(const key of ['model','prompt','harness','requestId'])if(options[key]!=null)batch[key]=options[key];
+    for(const key of ['model','prompt','harness','requestId','condition'])if(options[key]!=null)batch[key]=options[key];
   }
   function fallbackChunks(raw){
     return raw.split(/\n[ \t]*---[ \t]*(?:\n|$)/).filter(c=>/(?:^|\n)[ \t]*(?:before|이전|Table\s*Edit|표\s*셀\s*변경|Chart\s*Edit|Visual\s*Edit|차트\s*수치\s*변경)/i.test(c));
@@ -177,11 +387,33 @@
     }else if(!populateBlueItem(item,entry,index,segments,batch))return;
     batch.items.push(item);
   }
+  const EXTRA_STRING_ALIASES=[
+    ['reportNumber',['id']],
+    ['findingType',['defect_type','type']],
+    ['verdictLabel',['verdict']],
+    ['locationLabel',['location']],
+    ['uncertainty',['additionalInfo','neededInfo']]
+  ];
+  function copyAliasField(item,entry,target,aliases){
+    if(item[target])return;
+    for(const key of aliases){
+      const val=entry[key];
+      if(typeof val==='string'&&val.trim()){item[target]=target==='uncertainty'?val:val.trim();return;}
+    }
+  }
+  function copyExtraFindingFields(item,entry){
+    for(const [target,aliases] of EXTRA_STRING_ALIASES)copyAliasField(item,entry,target,aliases);
+    if(item.confidence===undefined&&typeof entry.confidence==='number'&&Number.isFinite(entry.confidence))item.confidence=String(entry.confidence);
+  }
   function copyFindingFields(item,entry){
-        for(const key of ['findingType','severity','confidence','locationLabel','reportNumber','verdictLabel','defectFamily'])if(typeof entry[key]==='string')item[key]=entry[key];if(entry.zeroDropRecovered===true)item.zeroDropRecovered=true;if(item.pageIndex===null&&Number.isInteger(entry.page)&&entry.page>0)item.pageIndex=entry.page-1;
+        for(const key of ['findingType','severity','confidence','locationLabel','reportNumber','verdictLabel','defectFamily'])if(typeof entry[key]==='string')item[key]=entry[key];copyExtraFindingFields(item,entry);if(entry.zeroDropRecovered===true)item.zeroDropRecovered=true;if(item.pageIndex===null&&Number.isInteger(entry.page)&&entry.page>0)item.pageIndex=entry.page-1;
+  }
+  function rationaleOf(entry){
+    for(const key of ['rationale','description','message','reason'])if(typeof entry[key]==='string')return entry[key];
+    return '';
   }
   function createResponseItem(entry,role){
-        return {id:id(),kind:role==='red'?'change':'finding',rationale:typeof entry.rationale==='string'?entry.rationale:typeof entry.description==='string'?entry.description:typeof entry.message==='string'?entry.message:'',evidence:evidence(entry.evidence),references:evidence(entry.references),attackTypes:strings(entry.attackTypes),uncertainty:typeof entry.uncertainty==='string'?entry.uncertainty:'',segmentId:typeof entry.segmentId==='string'?entry.segmentId:null,pageIndex:Number.isInteger(entry.pageIndex)&&entry.pageIndex>=0?entry.pageIndex:null,matchStatus:'missing',anchor:null,matches:[]};
+        return {id:id(),kind:role==='red'?'change':'finding',rationale:rationaleOf(entry),evidence:evidence(entry.evidence),references:evidence(entry.references),attackTypes:strings(entry.attackTypes),uncertainty:typeof entry.uncertainty==='string'?entry.uncertainty:'',segmentId:typeof entry.segmentId==='string'?entry.segmentId:null,pageIndex:Number.isInteger(entry.pageIndex)&&entry.pageIndex>=0?entry.pageIndex:null,matchStatus:'missing',anchor:null,matches:[]};
   }
   function collectRedJsonList(obj,batch){
     const prose=obj.changes??obj.candidates??obj.edits;
@@ -227,12 +459,19 @@
     return null;
   }
   function readFindingTable(raw,obj,role,batch){
-    const table=role==='blue'&&!obj?markdownFindings(raw):null;if(table&&table.report)batch.report=table.report;if(table?.zeroDropSummary)applyZeroDropResult(batch,{summary:table.zeroDropSummary});if(table)for(const line of table.malformed)batch.diagnostics.push({code:'malformed-item',line,message:'이 표 행을 읽지 못했습니다.'});
+    if(role!=='blue'||obj)return null;
+    const table=mergeTableAndCsv(markdownFindings(raw),csvFindings(raw));
+    if(!table)return null;
+    if(table.report)batch.report=table.report;
+    if(table.meta?.model&&batch.model==null)batch.model=table.meta.model;
+    if(table.meta?.condition&&batch.condition==null)batch.condition=table.meta.condition;
+    if(table.zeroDropSummary)applyZeroDropResult(batch,{summary:table.zeroDropSummary});
+    for(const line of table.malformed||[])batch.diagnostics.push({code:'malformed-item',line,message:'이 표 행을 읽지 못했습니다.'});
     return table;
   }
   function readBatchMetadata(obj,options,role,batch){
 if(obj&&typeof obj==='object'&&!Array.isArray(obj)){
-      for(const key of ['model','prompt','harness','requestId'])if(batch[key]==null&&obj[key]!=null)batch[key]=obj[key];
+      for(const key of ['model','prompt','harness','requestId','condition'])if(batch[key]==null&&obj[key]!=null)batch[key]=obj[key];
       for(const key of ['fileHash','sourceHash'])if(typeof obj[key]==='string'&&obj[key]&&typeof options[key]==='string'&&obj[key]!==options[key])batch.diagnostics.push({code:'file-hash-mismatch',message:'응답의 원문 식별이 현재 파일과 다릅니다. 확인이 필요합니다.',identity:key,claimed:obj[key]});
       if(typeof obj.role==='string'&&obj.role.toLowerCase()!==role)batch.diagnostics.push({code:'role-mismatch',message:'응답의 역할이 현재 작업과 다릅니다.'});
       if(['abstain','refusal'].includes(obj.status))batch.status=obj.status;

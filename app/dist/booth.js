@@ -10,7 +10,7 @@
   'use strict';
   /* blind-pdf.js hands its one-time trust capability to the first caller. booth.js loads after it and
      claims it here, so no later page script can mark bytes as trusted. */
-  const blindTrust=claimBlindTrust();
+  const blindTrust=boothConfigured(readConfig())?claimBlindTrust():null;
   function claimBlindTrust(){
     try{
       const blind=root.FalsifyBlindPdf;
@@ -867,13 +867,308 @@
     if(item) item.hidden=!!hidden;
   }
 
+  function licenseId(paperLike){
+    if(!paperLike||paperLike.license==null) return '';
+    if(typeof paperLike.license==='string') return paperLike.license;
+    return typeof paperLike.license.id==='string'?paperLike.license.id:'';
+  }
+  function headerValue(headers, name){
+    if(!headers||typeof headers.get!=='function') return '';
+    return headers.get(name)||'';
+  }
+  function paperWidgets(doc,action){
+    const directProps=new Set(['className','textContent','id','type','value','checked','hidden','disabled']);
+    function assignProp(node, key, value){
+      if(value==null||value===false) return;
+      if(directProps.has(key)) node[key]=value;
+      else node.setAttribute(key,String(value));
+    }
+    function el(tag,props,...kids){
+      const node=doc.createElement(tag);
+      for(const [key,value] of Object.entries(props||{})) assignProp(node,key,value);
+      for(const kid of kids) if(kid!=null&&kid!==false) node.append(kid);
+      return node;
+    }
+    function extLink(href, text){
+      return el('a',{href,target:'_blank',rel:'noopener noreferrer',textContent:text});
+    }
+    function ticketStub(n){
+      const parts=n?[el('span',{className:'n',textContent:String(n)}),el('span',{className:'u',textContent:'쪽'})]:[];
+      return el('span',{className:'stub'},...parts,el('span',{className:'go',textContent:action}));
+    }
+    function paperTicket(label, title, line, n){
+      return el('button',{type:'button',className:'booth-tk booth-tk-h booth-mission'},
+        el('span',{className:'main'},
+          label?el('span',{className:'booth-lab',textContent:label}):null,
+          el('span',{className:'title',textContent:title}),
+          line?el('span',{className:'hint',textContent:line}):null),
+        ticketStub(n));
+    }
+    return {el,extLink,paperTicket};
+  }
+  function createRequest({configFn,config,fetchImpl,sessionFn,later,cancel,now}){
+    function coded(code, data, status, retryMs){
+      const error=Error(code||'invalid_request');
+      error.code=code||'invalid_request';
+      error.status=status||0;
+      error.retryAfter=retryMs||0;
+      error.receipt=data&&typeof data.receipt==='string'?data.receipt:'';
+      return error;
+    }
+    async function responseBytes(res){
+      if(res&&typeof res.arrayBuffer==='function') return new Uint8Array(await res.arrayBuffer());
+      if(res&&typeof res.blob==='function'){
+        const blob=await res.blob();
+        if(blob&&typeof blob.arrayBuffer==='function') return new Uint8Array(await blob.arrayBuffer());
+      }
+      return new Uint8Array();
+    }
+    async function bearer(){
+      const session=typeof sessionFn==='function'?sessionFn():sessionFn;
+      if(!session||typeof session.token!=='function') return '';
+      try{
+        const value=await session.token();
+        return typeof value==='string'&&/^[\x21-\x7e]{8,4096}$/.test(value)?value:'';
+      }catch{return '';}
+    }
+    function requestBase(){
+      return apiBaseOf(typeof configFn==='function'?configFn():config);
+    }
+    function requestPayload(spec, headers){
+      if(spec.form) return spec.form;
+      if(spec.body===undefined) return undefined;
+      headers['Content-Type']='application/json';
+      return JSON.stringify(spec.body);
+    }
+    async function requestAuth(spec, headers){
+      if(!spec.auth) return;
+      const token=await bearer();
+      if(!token) throw coded(offlineCode('session_missing'));
+      headers.Authorization='Bearer '+token;
+    }
+    function pdfFallback(status){
+      if(status===413) return 'payload_too_large';
+      if(status===403) return 'license_not_allowed';
+      if(status===429) return 'rate_limited';
+      return 'not_found';
+    }
+    function statusOf(res){
+      return res&&res.status||0;
+    }
+    async function readJson(res){
+      try{return await res.json();}catch{return null;}
+    }
+    async function pdfResult(res){
+      if(res&&res.ok) return {bytes:await responseBytes(res),headers:res.headers||{get(){return null;}}};
+      const data=await readJson(res);
+      const status=statusOf(res);
+      throw coded(errorCodeFrom(data)||pdfFallback(status),data,status);
+    }
+    async function jsonResult(res){
+      const data=await readJson(res);
+      if(res&&res.ok) return data;
+      const status=statusOf(res);
+      const fallback=status===429?'rate_limited':'invalid_request';
+      const retry=status===429?retryAfterMs(headerValue(res.headers,'Retry-After'),now()):0;
+      throw coded(errorCodeFrom(data)||fallback,data,status,retry);
+    }
+    function bindAbort(parent, abort){
+      if(!parent) return ()=>{};
+      if(parent.aborted){abort();return ()=>{};}
+      if(typeof parent.addEventListener!=='function') return ()=>{};
+      parent.addEventListener('abort',abort,{once:true});
+      return ()=>{if(typeof parent.removeEventListener==='function') parent.removeEventListener('abort',abort);};
+    }
+    function requestSignal(spec){
+      const timeout=Number(spec.timeout)>0?Number(spec.timeout):0;
+      const parent=spec.signal||null;
+      if(!timeout||typeof AbortController!=='function') return {signal:parent||undefined,timedOut:()=>false,done(){}};
+      const controller=new AbortController();
+      const abort=()=>{try{controller.abort();}catch{}};
+      let timedOut=false;
+      const unbind=bindAbort(parent,abort);
+      const timer=later?later(()=>{timedOut=true;abort();},timeout):null;
+      return {
+        signal:controller.signal,
+        timedOut:()=>timedOut,
+        done(){if(timer!=null&&cancel) cancel(timer);unbind();}
+      };
+    }
+    async function request(path, spec){
+      const base=requestBase();
+      if(!base||typeof fetchImpl!=='function') throw coded('network');
+      const headers={Accept:'application/json'};
+      const payload=requestPayload(spec, headers);
+      await requestAuth(spec, headers);
+      const guard=requestSignal(spec);
+      try{
+        let res=null;
+        try{
+          res=await fetchImpl(base+path,{
+            method:spec.method||'GET',headers,
+            body:payload,signal:guard.signal,
+            credentials:'omit',cache:'no-store',redirect:'error'
+          });
+        }catch{throw coded(offlineCode('network'));}
+        const out=spec.pdf?await pdfResult(res):await jsonResult(res);
+        if(guard.timedOut()) throw coded(offlineCode('network'));
+        return out;
+      }finally{
+        guard.done();
+      }
+    }
+    return request;
+  }
+  function createPaperSearch({doc,widgets,request,deskQuery,chooseSearchResult,say,offerRetry,workbench=false}){
+    const {el,extLink,paperTicket}=widgets;
+    const byId=id=>doc.getElementById(id);
+    const desktopPlaceholder=workbench?'arXiv 논문 찾기 · 영어 제목 또는 주제':'다른 공개 논문 찾기 · 영어 제목 또는 주제';
+    let searchOpenedForDesk=false;
+    let searchPage=1;
+    let searchQuery='';
+    let searchGeneration=0;
+    function buildSearch(){
+      return el('details',{id:'booth-search-box',className:'booth-more'},
+        el('summary',{textContent:workbench?'arXiv 논문 검색':'다른 공개 논문 직접 찾기'}),
+        el('form',{id:'booth-search',className:'booth-search',hidden:!workbench},
+          el('label',{for:'booth-search-q',className:'booth-field'},el('span',{className:'booth-klab',textContent:'논문 검색 · CC BY, CC BY-SA, CC0만'}),
+            el('input',{id:'booth-search-q',type:'search',maxlength:'200',placeholder:'영어 제목 또는 주제',autocomplete:'off'})),
+          el('button',{id:'booth-search-go',type:'submit',className:'booth-btn line',textContent:'검색'}),
+          el('p',{id:'booth-search-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
+          el('div',{id:'booth-search-results',className:'booth-search-results'}),
+          el('div',{id:'booth-search-pages',className:'booth-row',hidden:true})));
+    }
+    function searchMeta(item){
+      const authors=Array.isArray(item.authors)?item.authors.slice(0,3).join(', '):'';
+      return [authors,item.year].filter(value=>value!=null&&value!=='').join(' · ');
+    }
+    function searchSourceLink(item){
+      const id=typeof item.id==='string'?item.id.trim():'';
+      const url=arxivUrl(id);
+      if(!url) return null;
+      const lic=licenseId(item);
+      const label=licenseLabel(lic);
+      const lUrl=licenseUrl(lic);
+      const parts=['원문 ',extLink(url,'arXiv '+id)];
+      if(label&&lUrl) parts.push(' · ',extLink(lUrl,label));
+      return el('p',{className:'booth-credit booth-search-source'},...parts);
+    }
+    function searchResultCard(item){
+      const title=sanitizePaperTitle(item.title)||item.id;
+      const label=['arXiv '+item.id,licenseLabel(licenseId(item))].filter(Boolean).join(' · ');
+      const button=paperTicket(label,title,String(searchMeta(item)),0);
+      button.setAttribute('aria-label',title+(workbench?' · 논문 열기':' · 이 논문으로 도전'));
+      button.addEventListener('click',()=>{void chooseSearchResult(item);});
+      const source=searchSourceLink(item);
+      return source?el('div',{className:'booth-search-item'},button,source):button;
+    }
+    function searchPager(pages, payload){
+      pages.hidden=searchPage<=1&&!(payload&&payload.hasMore);
+      if(searchPage>1){
+        const prev=el('button',{type:'button',className:'booth-btn line',textContent:'이전'});
+        prev.addEventListener('click',()=>{searchPage-=1;void runSearch();});
+        pages.append(prev);
+      }
+      if(payload&&payload.hasMore&&searchPage<5){
+        const next=el('button',{type:'button',className:'booth-btn line',textContent:'다음'});
+        next.addEventListener('click',()=>{searchPage+=1;void runSearch();});
+        pages.append(next);
+      }
+    }
+    /* OpenAlex and arXiv index English text, so a Hangul query that finds nothing points to English. */
+    function emptySearchLine(){
+      return /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/.test(searchQuery)
+        ?'검색 결과가 없어요. 영어로 찾아볼까요? 예: medical imaging'
+        :'검색 결과가 없어요. 다른 단어로 찾아볼까요?';
+    }
+    function renderSearch(payload){
+      const box=byId('booth-search-results');
+      const pages=byId('booth-search-pages');
+      if(!box||!pages) return;
+      box.textContent='';
+      pages.textContent='';
+      const results=payload&&Array.isArray(payload.results)?payload.results:[];
+      const eligible=results.filter(item=>item&&ARXIV_ID.test(item.id)&&item.licenseVerified===true&&LICENSE_RE.test(licenseId(item)));
+      say('booth-search-status',eligible.length?'':emptySearchLine());
+      for(const item of eligible) box.append(searchResultCard(item));
+      searchPager(pages, payload);
+    }
+    async function runSearch(){
+      const generation=++searchGeneration;
+      const path=paperSearchPath(searchQuery,searchPage);
+      if(!path){say('booth-search-status',errorMessage('invalid_request'));return;}
+      say('booth-search-status','검색 중…');
+      try{
+        const result=await request(path,{method:'GET',auth:true});
+        if(generation===searchGeneration) renderSearch(result);
+      }
+      catch(error){
+        if(generation!==searchGeneration) return;
+        say('booth-search-status',errorMessage(error.code,error));
+        if(offerRetry) offerRetry('booth-search-status',error,runSearch);
+      }
+    }
+    /* On desktop the paper search is always open as one row; phones keep the disclosure. */
+    function applyDesk(){
+      const desk=!!(deskQuery&&deskQuery.matches);
+      const box=byId('booth-search-box');
+      if(box&&desk&&!box.open){box.open=true;searchOpenedForDesk=true;}
+      else if(box&&!desk&&searchOpenedForDesk){box.open=false;searchOpenedForDesk=false;}
+      byId('booth-search-go').textContent=desk?'찾기':'검색';
+      byId('booth-search-q').setAttribute('placeholder',desk?desktopPlaceholder:'영어 제목 또는 주제');
+    }
+    function bind(on){
+      on(byId('booth-search'),'submit',event=>{
+        if(event&&typeof event.preventDefault==='function') event.preventDefault();
+        const input=byId('booth-search-q');
+        searchQuery=input?input.value:'';
+        searchPage=1;
+        void runSearch();
+      });
+      on(deskQuery,'change',applyDesk);
+      applyDesk();
+    }
+    return {element:buildSearch(),bind,sourceLink:searchSourceLink};
+  }
+  function mountWorkbenchSearch(container,open){
+    const doc=container.ownerDocument;
+    const base=parseBase(container.dataset.apiBase);
+    const session=root.FalsifyHostedSession?.forBase(base);
+    const request=createRequest({
+      config:{apiBase:base},fetchImpl:root.fetch.bind(root),sessionFn:()=>session,...timerServices({})
+    });
+    async function read(path,spec){
+      try{return await request(path,spec);}
+      catch(error){
+        if(error.status!==401) throw error;
+        session.invalidate();
+        return request(path,spec);
+      }
+    }
+    async function load(item){
+      const id=typeof item==='string'?item.trim():(item&&typeof item.id==='string'?item.id.trim():'');
+      const path=paperPdfPath(id);
+      if(!path) throw new Error(errorMessage('invalid_request'));
+      let payload;
+      try{payload=await read(path,{auth:true,pdf:true});}
+      catch(error){throw new Error(errorMessage(error.code,error));}
+      return new File([payload.bytes],'arxiv-'+id.replaceAll('/','-')+'.pdf',{type:'application/pdf'});
+    }
+    const search=createPaperSearch({
+      doc,widgets:paperWidgets(doc,'열기 →'),request:read,deskQuery:deskMedia(root.matchMedia.bind(root)),
+      chooseSearchResult:item=>open(()=>load(item),{id:item.id,title:sanitizePaperTitle(item.title),license:licenseId(item)}),
+      say:(id,text)=>{doc.getElementById(id).textContent=text;},workbench:true
+    });
+    container.append(search.element);
+    search.bind((node,type,fn)=>node?.addEventListener(type,fn));
+    return Object.assign({},search,{load});
+  }
+
   function mount(options){
     const ctx=mountContext(options);
     if(!ctx) return {destroy(){}};
     const doc=ctx.doc;
-    const configFn=ctx.configFn;
-    const config=ctx.config;
-    const fetchImpl=ctx.fetchImpl;
+    const request=createRequest(ctx);
     const cryptoApi=ctx.cryptoApi;
     const storage=ctx.storage;
     const sessionFn=ctx.sessionFn;
@@ -885,7 +1180,9 @@
     const stopEvery=ctx.stopEvery;
     const trustFetched=ctx.trustFetched;
     const deskQuery=deskMedia(ctx.matchMedia);
-    let searchOpenedForDesk=false;
+    const widgets=paperWidgets(doc,'도전 →');
+    const {el,extLink,paperTicket}=widgets;
+    const search=createPaperSearch({doc,widgets,request,deskQuery,chooseSearchResult,say,offerRetry});
     let dockPopOpen=false;
     const listeners=[];
     const course='quick';
@@ -911,8 +1208,6 @@
     let sourceSha='';
     let adoptedSignature='';
     let rows=[];
-    let searchPage=1;
-    let searchQuery='';
     let making=null;
     let makeSeq=0;
     let ticket=null;
@@ -933,18 +1228,6 @@
       if(!target||typeof target.addEventListener!=='function') return;
       target.addEventListener(type,handler);
       listeners.push([target,type,handler]);
-    }
-    const directProps=new Set(['className','textContent','id','type','value','checked','hidden','disabled']);
-    function assignProp(node, key, value){
-      if(value==null||value===false) return;
-      if(directProps.has(key)) node[key]=value;
-      else node.setAttribute(key,String(value));
-    }
-    function el(tag,props,...kids){
-      const node=doc.createElement(tag);
-      for(const [key,value] of Object.entries(props||{})) assignProp(node,key,value);
-      for(const kid of kids) if(kid!=null&&kid!==false) node.append(kid);
-      return node;
     }
     function svg(tag, attrs, ...kids){
       if(typeof doc.createElementNS!=='function') return null;
@@ -1025,17 +1308,6 @@
           el('p',{className:'booth-klab',textContent:'이 브라우저의 접수'}),
           el('div',{id:'booth-receipts-list',className:'booth-hist'})));
     }
-    function buildSearch(){
-      return el('details',{id:'booth-search-box',className:'booth-more'},
-        el('summary',{textContent:'다른 공개 논문 직접 찾기'}),
-        el('form',{id:'booth-search',className:'booth-search',hidden:true},
-          el('label',{for:'booth-search-q',className:'booth-field'},el('span',{className:'booth-klab',textContent:'논문 검색 · CC BY, CC BY-SA, CC0만'}),
-            el('input',{id:'booth-search-q',type:'search',maxlength:'200',placeholder:'영어 제목 또는 주제',autocomplete:'off'})),
-          el('button',{id:'booth-search-go',type:'submit',className:'booth-btn line',textContent:'검색'}),
-          el('p',{id:'booth-search-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
-          el('div',{id:'booth-search-results',className:'booth-search-results'}),
-          el('div',{id:'booth-search-pages',className:'booth-row',hidden:true})));
-    }
     function buildLeaderboard(){
       return el('section',{id:'booth-leaderboard',className:'booth-lb',hidden:true,'aria-label':'래더보드'},
         el('div',{className:'booth-lb-head'},
@@ -1100,7 +1372,7 @@
           el('section',{id:'booth-missions',className:'booth-missions','aria-label':'미션 논문'}),
           el('p',{id:'booth-mission-status',className:'booth-feedback',role:'status','aria-live':'polite'}),
           el('p',{id:'booth-mission-credit',className:'booth-small',textContent:MISSION_CREDIT}),
-          buildSearch()));
+          search.element));
       return el('div',{id:'booth-step-pick',className:'booth-step'},top,landing,buildRecords(),buildLeaderboard());
     }
     function buildEdit(){
@@ -1280,116 +1552,6 @@
     placeBooth(doc, host);
     setRailBlue(doc, true);
 
-    function coded(code, data, status, retryMs){
-      const error=Error(code||'invalid_request');
-      error.code=code||'invalid_request';
-      error.status=status||0;
-      error.retryAfter=retryMs||0;
-      error.receipt=data&&typeof data.receipt==='string'?data.receipt:'';
-      return error;
-    }
-    async function responseBytes(res){
-      if(res&&typeof res.arrayBuffer==='function') return new Uint8Array(await res.arrayBuffer());
-      if(res&&typeof res.blob==='function'){
-        const blob=await res.blob();
-        if(blob&&typeof blob.arrayBuffer==='function') return new Uint8Array(await blob.arrayBuffer());
-      }
-      return new Uint8Array();
-    }
-    async function bearer(){
-      const session=typeof sessionFn==='function'?sessionFn():sessionFn;
-      if(!session||typeof session.token!=='function') return '';
-      try{
-        const value=await session.token();
-        return typeof value==='string'&&/^[\x21-\x7e]{8,4096}$/.test(value)?value:'';
-      }catch{return '';}
-    }
-    function requestBase(){
-      return apiBaseOf(typeof configFn==='function'?configFn():config);
-    }
-    function requestPayload(spec, headers){
-      if(spec.form) return spec.form;
-      if(spec.body===undefined) return undefined;
-      headers['Content-Type']='application/json';
-      return JSON.stringify(spec.body);
-    }
-    async function requestAuth(spec, headers){
-      if(!spec.auth) return;
-      const token=await bearer();
-      if(!token) throw coded(offlineCode('session_missing'));
-      headers.Authorization='Bearer '+token;
-    }
-    function pdfFallback(status){
-      if(status===413) return 'payload_too_large';
-      if(status===403) return 'license_not_allowed';
-      if(status===429) return 'rate_limited';
-      return 'not_found';
-    }
-    function statusOf(res){
-      return res&&res.status||0;
-    }
-    async function readJson(res){
-      try{return await res.json();}catch{return null;}
-    }
-    async function pdfResult(res){
-      if(res&&res.ok) return {bytes:await responseBytes(res),headers:res.headers||{get(){return null;}}};
-      const data=await readJson(res);
-      const status=statusOf(res);
-      throw coded(errorCodeFrom(data)||pdfFallback(status),data,status);
-    }
-    async function jsonResult(res){
-      const data=await readJson(res);
-      if(res&&res.ok) return data;
-      const status=statusOf(res);
-      const fallback=status===429?'rate_limited':'invalid_request';
-      const retry=status===429?retryAfterMs(headerValue(res.headers,'Retry-After'),now()):0;
-      throw coded(errorCodeFrom(data)||fallback,data,status,retry);
-    }
-    function bindAbort(parent, abort){
-      if(!parent) return ()=>{};
-      if(parent.aborted){abort();return ()=>{};}
-      if(typeof parent.addEventListener!=='function') return ()=>{};
-      parent.addEventListener('abort',abort,{once:true});
-      return ()=>{if(typeof parent.removeEventListener==='function') parent.removeEventListener('abort',abort);};
-    }
-    function requestSignal(spec){
-      const timeout=Number(spec.timeout)>0?Number(spec.timeout):0;
-      const parent=spec.signal||null;
-      if(!timeout||typeof AbortController!=='function') return {signal:parent||undefined,timedOut:()=>false,done(){}};
-      const controller=new AbortController();
-      const abort=()=>{try{controller.abort();}catch{}};
-      let timedOut=false;
-      const unbind=bindAbort(parent,abort);
-      const timer=later?later(()=>{timedOut=true;abort();},timeout):null;
-      return {
-        signal:controller.signal,
-        timedOut:()=>timedOut,
-        done(){if(timer!=null&&cancel) cancel(timer);unbind();}
-      };
-    }
-    async function request(path, spec){
-      const base=requestBase();
-      if(!base||typeof fetchImpl!=='function') throw coded('network');
-      const headers={Accept:'application/json'};
-      const payload=requestPayload(spec, headers);
-      await requestAuth(spec, headers);
-      const guard=requestSignal(spec);
-      try{
-        let res=null;
-        try{
-          res=await fetchImpl(base+path,{
-            method:spec.method||'GET',headers,
-            body:payload,signal:guard.signal,
-            credentials:'omit',cache:'no-store',redirect:'error'
-          });
-        }catch{throw coded(offlineCode('network'));}
-        const out=spec.pdf?await pdfResult(res):await jsonResult(res);
-        if(guard.timedOut()) throw coded(offlineCode('network'));
-        return out;
-      }finally{
-        guard.done();
-      }
-    }
     function galleryEnabled(){
       return featuresOf(liveConfig).gallery;
     }
@@ -2292,11 +2454,6 @@
         settleMake(false);
       }
     }
-    function licenseId(paperLike){
-      if(!paperLike||paperLike.license==null) return '';
-      if(typeof paperLike.license==='string') return paperLike.license;
-      return typeof paperLike.license.id==='string'?paperLike.license.id:'';
-    }
     /* 다음 runs the MuPDF training-marker check (blind-pdf.js) on the source first. A paper the booth
        fetched from arXiv through GET /v1/papers/pdf skips it: blind-pdf.js keeps the SHA-256 of exactly
        these response bytes and skips MuPDF only when the PDF handed to generation has that hash. Recipe
@@ -2379,10 +2536,6 @@
       openedHash='';
       openedPaper=null;
       clearPaper();
-    }
-    function headerValue(headers, name){
-      if(!headers||typeof headers.get!=='function') return '';
-      return headers.get(name)||'';
     }
     function pdfFileName(headerName, nameHint){
       const named=/filename="([^"]+)"/.exec(headerName||'');
@@ -2570,9 +2723,6 @@
       say(statusId,'');
       return true;
     }
-    function extLink(href, text){
-      return el('a',{href,target:'_blank',rel:'noopener noreferrer',textContent:text});
-    }
     function creditParts(current){
       const id=current&&typeof current.id==='string'?current.id.trim():'';
       const url=arxivUrl(id);
@@ -2656,18 +2806,6 @@
       if(paper&&paper.source==='mission'&&paper.id===mission.paperId){hint=missionHint;enterEdit(n);return Promise.resolve(true);}
       return startPaper(missionPaper(mission),mission.paperId,'booth-mission-status',n,missionHint);
     }
-    function ticketStub(n){
-      const parts=n?[el('span',{className:'n',textContent:String(n)}),el('span',{className:'u',textContent:'쪽'})]:[];
-      return el('span',{className:'stub'},...parts,el('span',{className:'go',textContent:'도전 →'}));
-    }
-    function paperTicket(label, title, line, n){
-      return el('button',{type:'button',className:'booth-tk booth-tk-h booth-mission'},
-        el('span',{className:'main'},
-          label?el('span',{className:'booth-lab',textContent:label}):null,
-          el('span',{className:'title',textContent:title}),
-          line?el('span',{className:'hint',textContent:line}):null),
-        ticketStub(n));
-    }
     function missionTicket(mission){
       const n=missionPage(mission);
       const title=typeof mission.title==='string'&&mission.title?mission.title:mission.paperId;
@@ -2713,73 +2851,11 @@
       setText('booth-mission-count','오늘의 미션 · '+valid.length);
       for(const mission of valid) box.append(missionTicket(mission));
     }
-    function searchMeta(item){
-      const authors=Array.isArray(item.authors)?item.authors.slice(0,3).join(', '):'';
-      return [authors,item.year].filter(value=>value!=null&&value!=='').join(' · ');
-    }
-    function searchSourceLink(item){
-      const id=typeof item.id==='string'?item.id.trim():'';
-      const url=arxivUrl(id);
-      if(!url) return null;
-      const lic=licenseId(item);
-      const label=licenseLabel(lic);
-      const lUrl=licenseUrl(lic);
-      const parts=['원문 ',extLink(url,'arXiv '+id)];
-      if(label&&lUrl) parts.push(' · ',extLink(lUrl,label));
-      return el('p',{className:'booth-credit booth-search-source'},...parts);
-    }
     /* A tap on the paper that is already open goes back to edit with its edits, as missions do. */
     function chooseSearchResult(item){
       if(opening) return Promise.resolve(false);
       if(paper&&paper.id===item.id){enterEdit(0);return Promise.resolve(true);}
       return startPaper({source:'arxiv',id:item.id,title:sanitizePaperTitle(item.title),license:licenseId(item)},item.id,'booth-search-status',0,'');
-    }
-    function searchResultCard(item){
-      const title=sanitizePaperTitle(item.title)||item.id;
-      const label=['arXiv '+item.id,licenseLabel(licenseId(item))].filter(Boolean).join(' · ');
-      const button=paperTicket(label,title,String(searchMeta(item)),0);
-      button.setAttribute('aria-label',title+' · 이 논문으로 도전');
-      button.addEventListener('click',()=>{void chooseSearchResult(item);});
-      const source=searchSourceLink(item);
-      return source?el('div',{className:'booth-search-item'},button,source):button;
-    }
-    function searchPager(pages, payload){
-      pages.hidden=searchPage<=1&&!(payload&&payload.hasMore);
-      if(searchPage>1){
-        const prev=el('button',{type:'button',className:'booth-btn line',textContent:'이전'});
-        prev.addEventListener('click',()=>{searchPage-=1;void runSearch();});
-        pages.append(prev);
-      }
-      if(payload&&payload.hasMore&&searchPage<5){
-        const next=el('button',{type:'button',className:'booth-btn line',textContent:'다음'});
-        next.addEventListener('click',()=>{searchPage+=1;void runSearch();});
-        pages.append(next);
-      }
-    }
-    /* OpenAlex and arXiv index English text, so a Hangul query that finds nothing points to English. */
-    function emptySearchLine(){
-      return /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/.test(searchQuery)
-        ?'검색 결과가 없어요. 영어로 찾아볼까요? 예: medical imaging'
-        :'검색 결과가 없어요. 다른 단어로 찾아볼까요?';
-    }
-    function renderSearch(payload){
-      const box=byId('booth-search-results');
-      const pages=byId('booth-search-pages');
-      if(!box||!pages) return;
-      box.textContent='';
-      pages.textContent='';
-      const results=payload&&Array.isArray(payload.results)?payload.results:[];
-      const eligible=results.filter(item=>item&&ARXIV_ID.test(item.id)&&item.licenseVerified===true&&LICENSE_RE.test(licenseId(item)));
-      say('booth-search-status',eligible.length?'':emptySearchLine());
-      for(const item of eligible) box.append(searchResultCard(item));
-      searchPager(pages, payload);
-    }
-    async function runSearch(){
-      const path=paperSearchPath(searchQuery,searchPage);
-      if(!path){say('booth-search-status',errorMessage('invalid_request'));return;}
-      say('booth-search-status','검색 중…');
-      try{renderSearch(await request(path,{method:'GET',auth:true}));}
-      catch(error){say('booth-search-status',errorMessage(error.code,error));offerRetry('booth-search-status',error,runSearch);}
     }
     function stopEvent(event){
       if(event&&typeof event.preventDefault==='function') event.preventDefault();
@@ -3545,15 +3621,6 @@
         item.setAttribute('aria-current',n===current?'step':'false');
       }
     }
-    /* On desktop the paper search is always open as one row; phones keep the disclosure. */
-    function applyDesk(){
-      const desk=!!(deskQuery&&deskQuery.matches);
-      const box=byId('booth-search-box');
-      if(box&&desk&&!box.open){box.open=true;searchOpenedForDesk=true;}
-      else if(box&&!desk&&searchOpenedForDesk){box.open=false;searchOpenedForDesk=false;}
-      setText('booth-search-go',desk?'찾기':'검색');
-      setAttr('booth-search-q','placeholder',desk?'다른 공개 논문 찾기 · 영어 제목 또는 주제':'영어 제목 또는 주제');
-    }
     function backToPick(){
       cancelMake();
       setStep('pick');
@@ -3622,13 +3689,6 @@
         say('booth-status','부스 정보를 불러오지 못했어요. 페이지를 새로 고쳐 주세요.');
       }
     }
-    on(byId('booth-search'),'submit',event=>{
-      if(event&&typeof event.preventDefault==='function') event.preventDefault();
-      const input=byId('booth-search-q');
-      searchQuery=input?input.value:'';
-      searchPage=1;
-      void runSearch();
-    });
     on(byId('booth-next'),'click',()=>{void beginMake();});
     on(byId('booth-dock-count'),'click',toggleDockPop);
     on(byId('booth-edit-back'),'click',backToPick);
@@ -3644,7 +3704,7 @@
     on(byId('booth-ticket-consent-input'),'change',()=>{void saveTicketConsent();});
     on(byId('booth-desk-records'),'click',openResult);
     on(byId('booth-live-records'),'click',openResult);
-    on(deskQuery,'change',applyDesk);
+    search.bind(on);
     on(byId('booth-send-back'),'click',()=>{setStep('edit');});
     on(byId('booth-submit'),'submit',event=>{void submitBooth(event);});
     on(byId('booth-copy'),'click',()=>{void copyReceipt();});
@@ -3679,7 +3739,6 @@
       output:()=>generatedFile?{file:generatedFile,sha256:generatedHash}:null
     };
     watchEdits();
-    applyDesk();
     setStep('pick');
     showResult(false);
     void loadConfig();
@@ -3703,7 +3762,7 @@
 
   if(boothConfigured(readConfig())) mount();
   root.FalsifyBooth={
-    normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
+    mountWorkbenchSearch,normalizeClaimKey,normalizeReceipt,buildSubmission,submissionForm,errorMessage,
     readReceipts,rememberReceipt,recentReceipts,receiptRecord,paperSearchPath,paperPdfPath,
     nextPollDelay,retryAfterMs,resultView,capMessage,
     parsePublicNote,diffParts,ENGINE_UNAVAILABLE,chancesLeft,formatClock,formatDuration,noteReceiptOutcome,licenseLabel,licenseUrl,arxivUrl,shortTitle,

@@ -1,0 +1,160 @@
+<a class="skip-link" href="#w8-main">작업 영역으로 건너뛰기</a>
+<main id="w8-main" class="booth" tabindex="-1">
+  <svg width="0" height="0" class="booth-defs" aria-hidden="true" focusable="false">
+    <filter id="booth-ink">
+      <feTurbulence type="fractalNoise" baseFrequency="1.1" numOctaves="2" seed="7" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.4 1.3" result="m"/>
+      <feComposite in="SourceGraphic" in2="m" operator="in"/>
+    </filter>
+  </svg>
+  <header class="booth-deskbar booth-desk">
+    <span class="booth-mk" aria-hidden="true">F</span>
+    <span class="booth-nm">Falsify</span>
+    <ol class="booth-desk-steps" aria-label="현재 단계">
+      <li data-step="pick" class="on" aria-current="step"><em>1</em>논문 고르기</li>
+      <li data-step="edit"><em>2</em>논문 편집</li>
+      <li data-step="review"><em>3</em>AI 검수</li>
+    </ol>
+    <a class="booth-desk-rec" href="index.html">고급 Workbench</a>
+  </header>
+  <header class="booth-top">
+    <span class="booth-mk" aria-hidden="true">F</span><span class="booth-nm">Falsify</span>
+    <a class="booth-toplink" href="index.html">고급 Workbench</a>
+  </header>
+
+  <p id="w8-status" class="booth-feedback" role="status"></p>
+  <section id="w8-sync" class="w8-sync" aria-label="Confluence 팀 동기화">
+    <div class="w8-sync-main">
+      <p id="w8-sync-status" class="booth-small" role="status" aria-live="polite"></p>
+      <a id="w8-sync-link" class="w8-sync-link" target="_blank" rel="noopener noreferrer" hidden>Confluence 페이지 열기</a>
+    </div>
+    <div class="w8-sync-actions">
+      <button id="w8-sync-connect" class="booth-btn line slim" type="button">Confluence 연결</button>
+      <button id="w8-sync-retry" class="booth-btn line slim" type="button" hidden>다시 시도</button>
+      <button id="w8-sync-disconnect" class="booth-btn line slim" type="button" hidden>연결 끊기</button>
+    </div>
+  </section>
+  <section id="w8-intake" class="booth-landing" aria-labelledby="w8-title">
+    <div class="booth-landing-intro">
+      <div class="booth-hero">
+        <p class="booth-lab">Paper Workbench</p>
+        <h1 id="w8-title" tabindex="-1" class="booth-headline hero">AI를 <b>속일 수</b><br>있을까요?</h1>
+        <p class="booth-copy">논문의 숫자나 문장을 고쳐 보세요. 내장 BLUE와 내 AI가 어디까지 찾아내는지 비교할 수 있어요.</p>
+      </div>
+      <ol class="booth-howto" aria-label="실험 순서">
+        <li><em>01</em><span><b>논문 고르기</b><span>내 PDF, arXiv 논문, 예제 중에서 골라요.</span></span></li>
+        <li><em>02</em><span><b>몰래 고치기</b><span>바꾸고 싶은 부분을 눌러요. 수정본은 바로 받을 수 있어요.</span></span></li>
+        <li><em>03</em><span><b>AI 검수</b><span>이미 고친 논문은 곧바로 검수할 수 있어요.</span></span></li>
+      </ol>
+    </div>
+    <div class="booth-landing-list">
+      <div class="booth-mhead booth-desk"><span class="booth-klab">논문 고르기</span></div>
+      <p class="booth-small">선택한 원문과 수정본은 프로젝트의 Google Drive에 저장돼요. AI용 링크를 받은 사람은 24시간 동안 해당 PDF를 열 수 있어요.</p>
+      <div id="w8-drop" class="booth-missions">
+        <div class="w8-intake-primary">
+          <button type="button" id="w8-open" class="booth-tk booth-tk-h">
+            <span class="main"><span class="title">내 PDF 열기</span><span class="hint">이 기기의 PDF를 선택하거나 여기에 끌어다 놓으세요.</span></span>
+            <span class="stub" aria-hidden="true"><span class="go">열기 →</span></span>
+          </button>
+          <button type="button" id="w8-library-toggle" class="booth-tk booth-tk-h w8-library-toggle" aria-expanded="false" aria-controls="w8-library-panel">
+            <span class="main"><span class="title">팀 자료 열기</span><span class="hint">Confluence 논문과 Jira·Confluence 실험 기록을 찾아보세요.</span></span>
+            <span class="stub" aria-hidden="true"><span class="go" id="w8-library-toggle-label">열어 보기 ▾</span></span>
+          </button>
+        </div>
+        <section id="w8-library-panel" class="w8-library-panel" aria-label="팀 논문과 실험 기록" hidden>
+          <div class="w8-library-head">
+            <span class="booth-klab">Confluence 팀 공간 논문</span>
+            <button type="button" id="w8-library-refresh" class="booth-btn line slim" hidden>새로고침</button>
+          </div>
+          <p id="w8-library-status" class="booth-feedback" role="status" aria-live="polite"></p>
+          <div id="w8-library-actions" class="w8-library-actions" hidden>
+            <button type="button" id="w8-library-connect" class="booth-btn line slim" hidden>Confluence 연결</button>
+          </div>
+          <div id="w8-library-sections" class="w8-library-sections" hidden>
+            <div id="w8-library-papers-group" class="w8-library-group">
+              <div class="w8-library-subhead">
+                <span class="booth-klab">등록된 논문</span>
+                <button type="button" id="w8-library-retry" class="booth-btn line slim" hidden>다시 시도</button>
+              </div>
+              <p id="w8-library-papers-status" class="booth-feedback" role="status" aria-live="polite"></p>
+              <ul id="w8-library-list" class="w8-library-list"></ul>
+              <button type="button" id="w8-library-more" class="booth-btn line wide" hidden>더 보기</button>
+            </div>
+            <div id="w8-library-att-group" class="w8-library-group">
+              <div class="w8-library-subhead">
+                <span class="booth-klab">PDF 첨부</span>
+                <button type="button" id="w8-library-att-retry" class="booth-btn line slim" hidden>다시 시도</button>
+              </div>
+              <p id="w8-library-att-status" class="booth-feedback" role="status" aria-live="polite"></p>
+              <ul id="w8-library-att-list" class="w8-library-list"></ul>
+              <button type="button" id="w8-library-att-more" class="booth-btn line wide" hidden>더 보기</button>
+            </div>
+            <div id="w8-history-group" class="w8-library-group w8-history-group" aria-label="팀 기록">
+              <div class="w8-library-subhead">
+                <span class="booth-klab">팀 기록</span>
+                <div class="w8-history-controls">
+                  <button type="button" id="w8-history-refresh" class="booth-btn line slim" hidden>새로고침</button>
+                  <button type="button" id="w8-history-retry" class="booth-btn line slim" hidden>다시 시도</button>
+                </div>
+              </div>
+              <div id="w8-history-tabs" class="w8-history-tabs" role="tablist" aria-label="팀 기록 출처">
+                <button type="button" id="w8-history-tab-confluence" class="w8-history-tab" role="tab" aria-selected="false" aria-controls="w8-history-body" data-history-source="confluence">Confluence</button>
+                <button type="button" id="w8-history-tab-jira" class="w8-history-tab" role="tab" aria-selected="false" aria-controls="w8-history-body" data-history-source="jira">Jira</button>
+              </div>
+              <div id="w8-history-body" class="w8-history-body" role="tabpanel" hidden>
+                <p id="w8-history-status" class="booth-feedback" role="status" aria-live="polite"></p>
+                <div id="w8-history-actions" class="w8-library-actions" hidden>
+                  <button type="button" id="w8-history-jira-connect" class="booth-btn line slim" hidden>Jira 읽기 권한 연결</button>
+                </div>
+                <ul id="w8-history-list" class="w8-library-list"></ul>
+                <button type="button" id="w8-history-more" class="booth-btn line wide" hidden>더 보기</button>
+                <article id="w8-history-detail" class="w8-history-detail" aria-label="팀 기록 보기" tabindex="-1" data-history-viewer="readonly" hidden></article>
+              </div>
+            </div>
+          </div>
+        </section>
+        <button type="button" id="w8-example" class="booth-tk booth-tk-h">
+          <span class="main"><span class="booth-lab">예제로 체험</span><span class="title">빛과 묘목의 성장</span><span class="hint">표의 수치 하나를 바꾸고 결과 문장과 비교해 보세요.</span></span>
+          <span class="stub"><span class="n">1</span><span class="u">쪽</span><span class="go">체험 →</span></span>
+        </button>
+      </div>
+      <div id="w8-search" data-api-base="{{PAPER_SEARCH_API}}" data-sync-base="{{TEAM_API}}"></div>
+      <button id="w8-return" class="booth-btn line wide" type="button" hidden>현재 논문으로 돌아가기</button>
+      <label id="w8-recent" class="booth-klab" hidden>최근 작업 <select id="w8-recent-paper"></select></label>
+    </div>
+  </section>
+  <input type="file" id="w8-file" accept="application/pdf,.pdf" hidden>
+
+  <section id="w8-session" hidden aria-labelledby="w8-name">
+    <button id="w8-choose" type="button" class="booth-back">← 논문 고르기</button>
+    <div class="w8-filebar">
+      <h2 id="w8-name" class="booth-headline small" tabindex="-1">현재 논문</h2>
+      <button type="button" class="booth-btn slim" id="w8-download">PDF 다운로드</button>
+      <button type="button" class="booth-btn line slim" id="w8-red-key-export" hidden>RED 정답지 CSV 다운로드</button>
+    </div>
+    <div id="w8-paper-credit" hidden></div>
+    <details id="w8-archive">
+      <summary>PDF 저장과 공유 링크</summary>
+      <p class="booth-small">Google Drive에 원문과 수정본을 보관합니다. AI용 링크는 24시간 동안 해당 PDF 한 편을 엽니다.</p>
+      <p id="w8-archive-status" class="booth-small" role="status"></p>
+      <a id="w8-source-link" target="_blank" rel="noopener noreferrer" hidden>원문 PDF</a>
+      <a id="w8-revision-link" target="_blank" rel="noopener noreferrer" hidden>수정본 PDF</a>
+      <button id="w8-archive-retry" class="booth-btn line slim" type="button" hidden>저장 다시 시도</button>
+      <button id="w8-archive-action" class="booth-btn line slim" type="button">링크 저장</button>
+    </details>
+    <nav class="w8-tabs" aria-label="논문 작업">
+      <button type="button" id="w8-edit-tab" aria-controls="booth-step-edit" aria-current="page">논문 편집</button>
+      <button type="button" id="w8-review-tab" aria-controls="w8-review">BLUE 검수와 결과</button>
+    </nav>
+    <section id="booth-step-edit" aria-label="논문 편집">
+      <p id="w8-hint" class="booth-hint" hidden>표의 수치와 결과 문장을 비교해 보세요. 바꾸고 싶은 부분을 누르면 편집할 수 있어요.</p>
+      <div id="w8-editor"></div>
+    </section>
+    <section id="w8-review" aria-label="BLUE 검수와 결과" tabindex="-1" hidden>
+      <p class="w8-review-progress booth-feedback" role="status">검수할 PDF를 준비하는 중…</p>
+      <div id="w8-blue"></div>
+      <div id="w8-grading" hidden></div>
+      <div id="w8-csv"></div>
+    </section>
+  </section>
+</main>

@@ -784,9 +784,13 @@
   }
 
   /* ---------- page edit UI ---------- */
-  function mount(doc){
-    const stage=doc.getElementById('paper-before-stage');
-    if(!stage||!doc.getElementById('booth-step-edit')||doc.getElementById('booth-pe-bar')) return;
+  function canMount(doc, force){
+    const html=doc&&doc.documentElement;
+    return !!(force||(doc&&doc.getElementById('booth-step-edit'))||(html&&html.dataset&&html.dataset.boothStep==='edit'));
+  }
+  function mount(doc, opts){
+    const stage=doc&&doc.getElementById('paper-before-stage');
+    if(!stage||!canMount(doc,opts&&opts.force)||doc.getElementById('booth-pe-bar')) return false;
     const html=doc.documentElement;
     const st={sel:null,sheet:null,focus:null,pendingClick:null,fileHash:'',pageEl:null,auto:new Set(),autoOff:false,composing:false,hoverFrame:0};
     const ws=()=>root.FalsifyPaperWorkspace||null;
@@ -1603,6 +1607,7 @@
     placeTools();
     syncBar();
     onMutate();
+    return true;
   }
 
   root.FalsifyBoothPageEdit=Object.freeze({
@@ -1610,12 +1615,13 @@
     densest,hintBlock,fitZoom,detectColumnSplits,groupLines,clusterBlock,
     applyEditsToBlock,applyEditsToBlockWithMap,diffChangedRange,mapRangeToBlockLines,
     changedBlockEdit,commitParagraphChange,
+    mount:(targetDoc, opts)=>mount(targetDoc||root.document, opts),
     ZOOM,TABLE_ZOOM
   });
   const doc=root.document;
   if(!doc||typeof doc.getElementById!=='function') return;
   const start=()=>mount(doc);
-  if(doc.getElementById('booth-step-edit')) start();
+  if(canMount(doc,false)) start();
   else if(doc.readyState==='loading') doc.addEventListener('DOMContentLoaded',start);
   else root.setTimeout(start,0);
 })(typeof window==='object'?window:globalThis);

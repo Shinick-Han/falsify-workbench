@@ -1609,3 +1609,94 @@ test('mixed modelProviders group Claude and OpenAI and label the job provider',a
   await until(()=>/완료/.test(unknown.text('hosted-ai-job-state')),'unknown provider job completes');
   assert.match(unknown.text('hosted-ai-job-model'),/실행: custom-runtime/);
 });
+
+test('local Gemini is BLUE-only with default selection and fixed high effort while RED keeps Claude/GPT',async()=>{
+  const models=['claude-opus-5-5','gpt-6.2-astra','gemini-4-neon-high'];
+  const caps={
+    ...CAPS,
+    provider:'mixed',
+    models,
+    modelProviders:{
+      'claude-opus-5-5':'anthropic',
+      'gpt-6.2-astra':'openai',
+      'gemini-4-neon-high':'agy-cli',
+    },
+    blueDefaultModel:'gemini-4-neon-high',
+    blueDefaultEffort:'high',
+  };
+  const posted=[];
+  const entry=setup({routes:makeRouter({
+    caps,
+    jobsPost:record=>{
+      const body=JSON.parse(record.body);
+      posted.push(body);
+      return {status:202,body:{job:job({
+        id:'job-'+posted.length,
+        role:body.role,
+        state:'completed',
+        model:body.model,
+        effort:body.effort,
+        provider:body.model==='gemini-4-neon-high'?'agy-cli':'anthropic',
+        progress:{completedCalls:1,requiredCalls:1,phase:'done'},
+        result:body.role==='red'
+          ?{candidates:[{id:'c1',segmentId:'p1-b1',before:'10',after:'11',occurrence:0}]}
+          :{counts:{rejected:0,unresolved:0},findings:[]},
+      }),replayed:false}};
+    },
+  })});
+  await entry.app.ready;
+  await signIn(entry);
+
+  // RED excludes BLUE-only gemini-4-neon-high and defaults to Claude with unlocked effort.
+  assert.deepEqual(selectShape(entry.$('hosted-ai-model')),{
+    groups:[
+      {label:'Claude',values:['claude-opus-5-5']},
+      {label:'OpenAI',values:['gpt-6.2-astra']},
+    ],
+    flat:[],
+  });
+  assert.equal(entry.$('hosted-ai-model').value,'claude-opus-5-5');
+  assert.equal(entry.$('hosted-ai-effort').disabled,false);
+
+  // Switch to BLUE -> defaults to local Gemini with fixed high effort.
+  entry.$('hosted-ai-role').change('blue');
+  assert.deepEqual(selectShape(entry.$('hosted-ai-model')),{
+    groups:[
+      {label:'로컬 Gemini',values:['gemini-4-neon-high']},
+      {label:'Claude',values:['claude-opus-5-5']},
+      {label:'OpenAI',values:['gpt-6.2-astra']},
+    ],
+    flat:[],
+  });
+  assert.equal(entry.$('hosted-ai-model').value,'gemini-4-neon-high');
+  assert.equal(entry.$('hosted-ai-effort').value,'high');
+  assert.equal(entry.$('hosted-ai-effort').disabled,true);
+
+  await selectFile(entry,BYTES);
+  setPrompt(entry,PROMPT);
+  entry.$('hosted-ai-run').click();
+  await until(()=>posted.length===1,'BLUE job submits local Gemini default');
+  assert.equal(posted[0].role,'blue');
+  assert.equal(posted[0].model,'gemini-4-neon-high');
+  assert.equal(posted[0].effort,'high');
+  assert.match(entry.text('hosted-ai-job-model'),/모델: gemini-4-neon-high/);
+  assert.match(entry.text('hosted-ai-job-model'),/실행: 로컬 Gemini/);
+
+  // Explicit GPT in BLUE unlocks effort.
+  entry.$('hosted-ai-model').change('gpt-6.2-astra');
+  assert.equal(entry.$('hosted-ai-effort').disabled,false);
+  entry.$('hosted-ai-effort').change('medium');
+  entry.$('hosted-ai-run').click();
+  await until(()=>posted.length===2,'explicit GPT BLUE job submits');
+  assert.equal(posted[1].model,'gpt-6.2-astra');
+  assert.equal(posted[1].effort,'medium');
+
+  // Switch back to RED -> gemini-4-neon-high is hidden again and RED uses claude-opus-5-5.
+  entry.$('hosted-ai-role').change('red');
+  assert.equal(entry.$('hosted-ai-model').value,'claude-opus-5-5');
+  assert.equal(entry.$('hosted-ai-effort').disabled,false);
+  entry.$('hosted-ai-run').click();
+  await until(()=>posted.length===3,'RED job submits Claude default');
+  assert.equal(posted[2].role,'red');
+  assert.equal(posted[2].model,'claude-opus-5-5');
+});

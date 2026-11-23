@@ -424,7 +424,7 @@ async function tokenRequest(fetchImpl, env, fields) {
   return parsed;
 }
 
-async function accessibleCloud(fetchImpl, accessToken) {
+async function accessibleResource(fetchImpl, accessToken) {
   const response = await callUpstream(fetchImpl, 'https://api.atlassian.com/oauth/token/accessible-resources', {
     headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
   });
@@ -433,8 +433,16 @@ async function accessibleCloud(fetchImpl, accessToken) {
   const matches = list.filter(item => {
     try { return item && new URL(item.url).origin === SITE_URL; } catch { return false; }
   });
-  if (matches.length !== 1 || typeof matches[0].id !== 'string') fail(403, 'site_not_allowed');
-  return matches[0].id;
+  const id = matches[0]?.id;
+  if (typeof id !== 'string' || !matches.every(item => item.id === id)) fail(403, 'site_not_allowed');
+  // Atlassian can return separate Jira and Confluence containers for one cloud ID.
+  const lists = matches.map(item => item.scopes).filter(Array.isArray);
+  const scopes = lists.length ? [...new Set(lists.flat().filter(scope => typeof scope === 'string'))] : null;
+  return { id, scopes };
+}
+
+async function accessibleCloud(fetchImpl, accessToken) {
+  return (await accessibleResource(fetchImpl, accessToken)).id;
 }
 
 async function confine(fetchImpl, accessToken, cloudId, parent) {
@@ -621,6 +629,7 @@ async function refreshSession(fetchImpl, env, key, session, now) {
     refreshToken: typeof parsed.refresh_token === 'string' ? parsed.refresh_token : session.refreshToken,
     accessExp: now + parsed.expires_in * 1000,
     rotations: session.rotations + 1,
+    ...(typeof parsed.scope === 'string' ? { scopes: parsed.scope.split(/\s+/).filter(Boolean) } : {}),
   };
   return { session: next, sealed: await seal(key, SESSION_PURPOSE, next) };
 }
@@ -940,37 +949,60 @@ async function listArchives(ctx, session) {
   const config = confluenceConfig(ctx.env);
   const cursor = ctx.url.searchParams.get('cursor');
   if ([...ctx.url.searchParams.keys()].some(key => key !== 'cursor')) fail(400, 'invalid_request');
+  const { items, nextCursor } = await listParentChildren(
+    ctx,
+    session,
+    config.parent,
+    cursor,
+    (base, child) => readListedArchive(ctx, session, base, config.parent, child),
+  );
+  return json(200, { items, nextCursor });
+}
+
+function isDirectPageChild(child, parent) {
+  if (!child || !PAGE_ID.test(String(child.id))) return false;
+  if (child.type && child.type !== 'page') return false;
+  return String(child.parentId || parent) === parent;
+}
+
+async function mapParentChildren(results, parent, readChild) {
+  const items = new Array(results.length);
+  let nextIndex = 0;
+  async function listChild() {
+    while (nextIndex < results.length) {
+      const index = nextIndex++;
+      const child = results[index];
+      if (!isDirectPageChild(child, parent)) continue;
+      items[index] = await readChild(child);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(LIST_CONCURRENCY, results.length) }, listChild));
+  return items.filter(Boolean);
+}
+
+async function listParentChildren(ctx, session, parent, cursor, readChild, purpose = CURSOR_PURPOSE) {
   const key = await aesKey(ctx.env);
-  const upstreamCursor = await archiveListCursor(cursor, key, session.cloudId, config.parent);
-  await confine(ctx.fetchImpl, session.accessToken, session.cloudId, config.parent);
+  if (!key) fail(503, 'not_configured');
+  const upstreamCursor = await archiveListCursor(cursor, key, session.cloudId, parent, purpose);
+  await confine(ctx.fetchImpl, session.accessToken, session.cloudId, parent);
   const base = cloudBase(session.cloudId);
-  const pathname = `/ex/confluence/${session.cloudId}/wiki/api/v2/pages/${config.parent}/children`;
-  const url = `${base}/wiki/api/v2/pages/${config.parent}/children?limit=25${upstreamCursor ? `&cursor=${encodeURIComponent(upstreamCursor)}` : ''}`;
+  const pathname = `/ex/confluence/${session.cloudId}/wiki/api/v2/pages/${parent}/children`;
+  const url = `${base}/wiki/api/v2/pages/${parent}/children?limit=25${upstreamCursor ? `&cursor=${encodeURIComponent(upstreamCursor)}` : ''}`;
   const response = await callUpstream(ctx.fetchImpl, url, { headers: authHeaders(session.accessToken) });
   const payload = await readUpstreamJson(response);
   const results = Array.isArray(payload?.results) ? payload.results : null;
   if (!results || results.length > 25) fail(502, 'upstream_invalid');
-  const items = new Array(results.length);
-  let nextIndex = 0;
-  async function listChild() {
-   while (nextIndex < results.length) {
-    const index = nextIndex++;
-    const child = results[index];
-    if (!child || !PAGE_ID.test(String(child.id)) || String(child.parentId || config.parent) !== config.parent) continue;
-    items[index] = await readListedArchive(ctx, session, base, config.parent, child);
-   }
-  }
-  await Promise.all(Array.from({ length: Math.min(LIST_CONCURRENCY, results.length) }, listChild));
+  const items = await mapParentChildren(results, parent, child => readChild(base, child));
   const nextRaw = cursorFromNext(payload?._links?.next, pathname);
-  const nextCursor = nextRaw && key ? await seal(key, CURSOR_PURPOSE, { purpose: CURSOR_PURPOSE, cloudId: session.cloudId, parent: config.parent, cursor: nextRaw }) : null;
+  const nextCursor = nextRaw ? await seal(key, purpose, { purpose, cloudId: session.cloudId, parent, cursor: nextRaw }) : null;
   if (nextCursor && !CLIENT_CURSOR.test(nextCursor)) fail(502, 'upstream_invalid');
-  return json(200, { items: items.filter(Boolean), nextCursor });
+  return { items, nextCursor };
 }
 
-async function archiveListCursor(cursor, key, cloudId, parent) {
+async function archiveListCursor(cursor, key, cloudId, parent, purpose = CURSOR_PURPOSE) {
   if (cursor === null) return null;
   if (!CLIENT_CURSOR.test(cursor)) fail(400, 'invalid_cursor');
-  const opened = key ? await open(key, CURSOR_PURPOSE, cursor) : null;
+  const opened = key ? await open(key, purpose, cursor) : null;
   if (!opened || opened.cloudId !== cloudId || opened.parent !== parent || typeof opened.cursor !== 'string' || !CURSOR.test(opened.cursor)) {
     fail(400, 'invalid_cursor');
   }
@@ -1043,7 +1075,7 @@ async function requireReady(ctx) {
   if (!confluenceConfig(ctx.env).configured || !(await aesKey(ctx.env))) fail(503, 'not_configured');
 }
 
-async function startAuth(ctx) {
+export async function startAtlassianAuth(ctx, { extraScopes = [], scopeProfile = null } = {}) {
   const config = confluenceConfig(ctx.env);
   await requireReady(ctx);
   const origin = ctx.request.headers.get('Origin');
@@ -1055,16 +1087,18 @@ async function startAuth(ctx) {
   try { returnOrigin = new URL(body.returnOrigin).origin; } catch { fail(400, 'invalid_request'); }
   if (returnOrigin !== origin || returnOrigin !== body.returnOrigin || !origins(ctx.settings).has(returnOrigin)) fail(403, 'origin_not_allowed');
   const key = await aesKey(ctx.env);
+  const requestedScopes = [...new Set([...SCOPES, ...extraScopes.filter(s => typeof s === 'string' && s)])];
   const state = await seal(key, STATE_PURPOSE, {
     purpose: STATE_PURPOSE,
     nonce: body.nonce,
     returnOrigin,
     exp: ctx.now() + STATE_MS,
+    ...(scopeProfile ? { scopeProfile } : {}),
   });
   const authorize = new URL('https://auth.atlassian.com/authorize');
   authorize.searchParams.set('audience', 'api.atlassian.com');
   authorize.searchParams.set('client_id', config.client);
-  authorize.searchParams.set('scope', SCOPES.join(' '));
+  authorize.searchParams.set('scope', requestedScopes.join(' '));
   authorize.searchParams.set('redirect_uri', config.callback);
   authorize.searchParams.set('state', state);
   authorize.searchParams.set('response_type', 'code');
@@ -1072,18 +1106,50 @@ async function startAuth(ctx) {
   return json(200, { authorizeUrl: authorize.toString() });
 }
 
-async function callback(ctx) {
-  const config = confluenceConfig(ctx.env);
-  if (!config.configured || !(await aesKey(ctx.env))) return html(null, SITE_URL);
+async function startAuth(ctx) {
+  return startAtlassianAuth(ctx);
+}
+
+async function parseCallbackState(ctx, key) {
   const stateToken = ctx.url.searchParams.get('state');
-  const code = ctx.url.searchParams.get('code');
-  const key = await aesKey(ctx.env);
   const state = key && stateToken ? await open(key, STATE_PURPOSE, stateToken) : null;
   if (!state || typeof state.returnOrigin !== 'string' || !origins(ctx.settings).has(state.returnOrigin) || typeof state.nonce !== 'string') {
-    return html(null, SITE_URL);
+    return { errorOrigin: SITE_URL };
   }
-  if (state.exp <= ctx.now()) return html(null, state.returnOrigin);
-  if (ctx.url.searchParams.get('error') || typeof code !== 'string' || !/^[A-Za-z0-9._~-]{8,2048}$/.test(code)) return html(null, state.returnOrigin);
+  if (state.exp <= ctx.now()) return { errorOrigin: state.returnOrigin };
+  const code = ctx.url.searchParams.get('code');
+  if (ctx.url.searchParams.get('error') || typeof code !== 'string' || !/^[A-Za-z0-9._~-]{8,2048}$/.test(code)) {
+    return { errorOrigin: state.returnOrigin };
+  }
+  return { state, code };
+}
+
+function buildSealedSessionPayload(token, resource, state, now) {
+  const grantedScopes = typeof token.scope === 'string'
+    ? token.scope.split(/\s+/).filter(Boolean)
+    : resource.scopes;
+  const session = {
+    purpose: SESSION_PURPOSE,
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token,
+    accessExp: now + token.expires_in * 1000,
+    envelopeExp: now + ENVELOPE_MS,
+    rotations: 0,
+    cloudId: resource.id,
+    siteUrl: SITE_URL,
+  };
+  if (typeof state.scopeProfile === 'string') session.scopeProfile = state.scopeProfile;
+  if (Array.isArray(grantedScopes)) session.scopes = grantedScopes;
+  return session;
+}
+
+async function callback(ctx) {
+  const config = confluenceConfig(ctx.env);
+  const key = await aesKey(ctx.env);
+  if (!config.configured || !key) return html(null, SITE_URL);
+  const parsed = await parseCallbackState(ctx, key);
+  if (parsed.errorOrigin) return html(null, parsed.errorOrigin);
+  const { state, code } = parsed;
   try {
     const token = await tokenRequest(ctx.fetchImpl, ctx.env, {
       grant_type: 'authorization_code',
@@ -1091,21 +1157,18 @@ async function callback(ctx) {
       redirect_uri: config.callback,
     });
     if (typeof token.refresh_token !== 'string') return html(null, state.returnOrigin);
-    const cloudId = await accessibleCloud(ctx.fetchImpl, token.access_token);
-    await confine(ctx.fetchImpl, token.access_token, cloudId, config.parent);
-    const now = ctx.now();
-    const session = {
-      purpose: SESSION_PURPOSE,
-      accessToken: token.access_token,
-      refreshToken: token.refresh_token,
-      accessExp: now + token.expires_in * 1000,
-      envelopeExp: now + ENVELOPE_MS,
-      rotations: 0,
-      cloudId,
-      siteUrl: SITE_URL,
-    };
+    const resource = await accessibleResource(ctx.fetchImpl, token.access_token);
+    await confine(ctx.fetchImpl, token.access_token, resource.id, config.parent);
+    const session = buildSealedSessionPayload(token, resource, state, ctx.now());
     const sealed = await seal(key, SESSION_PURPOSE, session);
-    return html({ type: 'falsify.confluence.session.v1', nonce: state.nonce, session: sealed, expiresAt: new Date(session.envelopeExp).toISOString() }, state.returnOrigin);
+    const message = {
+      type: 'falsify.confluence.session.v1',
+      nonce: state.nonce,
+      session: sealed,
+      expiresAt: new Date(session.envelopeExp).toISOString(),
+    };
+    if (typeof state.scopeProfile === 'string') message.scopeProfile = state.scopeProfile;
+    return html(message, state.returnOrigin);
   } catch {
     return html(null, state.returnOrigin);
   }
@@ -1194,6 +1257,33 @@ export async function handleConfluence(ctx) {
     controller.abort();
   }
 }
+
+export const confluenceInternal = Object.freeze({
+  SCOPES,
+  SESSION_PURPOSE,
+  aesKey,
+  seal,
+  accessibleResource,
+  confine,
+  assertReadOpen,
+  bearerSession,
+  withSession,
+  callUpstream,
+  fetchBounded,
+  readUpstreamJson,
+  readRequestJson,
+  readBounded,
+  authHeaders,
+  cloudBase,
+  getPage,
+  listParentChildren,
+  downloadAttachment,
+  webUrl,
+  readyLabel,
+  propertyValue,
+  escapeHtml,
+  sha256,
+});
 
 export function confluenceOnly(env) {
   return env?.CONFLUENCE_ONLY === true || env?.CONFLUENCE_ONLY === 'true';

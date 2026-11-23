@@ -28,8 +28,11 @@
   const MAX_VISUAL_EDITS=12;
   const MAX_JOB_BODY_BYTES=60000;
   const STATE_LABELS={queued:'대기 중',running:'실행 중',cancelling:'취소 중',cancelled:'취소됨',completed:'완료',failed:'실패',interrupted:'중단됨(불완전)'};
-  const PROVIDER_LABELS={anthropic:'Claude',openai:'OpenAI'};
-  const PROVIDER_GROUP_ORDER=['anthropic','openai'];
+  const GEMINI_BLUE_MODEL='gemini-4-neon-high';
+  const GEMINI_BLUE_EFFORT='high';
+  const ALLOWED_PROVIDERS=new Set(['agy-cli','anthropic','openai']);
+  const PROVIDER_LABELS={'agy-cli':'로컬 Gemini',anthropic:'Claude',openai:'OpenAI'};
+  const PROVIDER_GROUP_ORDER=['agy-cli','anthropic','openai'];
   const FAILURE_LABELS={
     auth_required:'서버의 제공자 인증이 필요합니다',
     permission_denied:'서버 계정에 이 실행 권한이 없습니다',
@@ -260,6 +263,7 @@
       session:null, capabilities:null, restored:false,
       file:null, fileSha:'', fileError:'', upload:null,
       job:null, busy:'', model:'', effort:'', activeDigest:'', jobKind:'review',
+      modelByRole:{red:'',blue:''}, effortByRole:{red:'',blue:''}, renderedSelectRole:'', renderedSelectModel:'',
       reviewJob:null, reviewUpload:null,
       candidates:[], visualCandidates:[], chartOnly:0, skippedCandidates:0, candidateSignature:'',
       selection:{}, selectionVersion:0,
@@ -562,7 +566,7 @@
       const map={};
       for(const key of Object.keys(raw)){
         if(!/^[A-Za-z0-9._-]{1,64}$/.test(key)) continue;
-        if(raw[key]!=='anthropic'&&raw[key]!=='openai') continue;
+        if(!ALLOWED_PROVIDERS.has(raw[key])) continue;
         map[key]=raw[key];
       }
       return map;
@@ -572,12 +576,18 @@
       const models=Array.isArray(data.models)?data.models.filter(m=>typeof m==='string'&&/^[A-Za-z0-9._-]{1,64}$/.test(m)).slice(0,20):[];
       const efforts=Array.isArray(data.efforts)?data.efforts.filter(e=>typeof e==='string'&&/^[a-z]{1,16}$/.test(e)).slice(0,12):[];
       const limits=data.limits&&typeof data.limits==='object'?data.limits:{};
+      const blueDefaultModel=typeof data.blueDefaultModel==='string'&&models.includes(data.blueDefaultModel)
+        ?data.blueDefaultModel:'';
+      const blueDefaultEffort=typeof data.blueDefaultEffort==='string'&&/^[a-z]{1,16}$/.test(data.blueDefaultEffort)
+        ?data.blueDefaultEffort:'';
       return {
         enabled:data.enabled===true,
         provider:typeof data.provider==='string'?data.provider.slice(0,32):'',
         execution:typeof data.execution==='string'?data.execution.slice(0,32):'',
         models,efforts,
         modelProviders:readModelProviders(data),
+        blueDefaultModel,
+        blueDefaultEffort,
         maxUploadBytes:positiveInt(limits.maxUploadBytes)||MAX_UPLOAD_FALLBACK,
         maxPromptChars:positiveInt(limits.maxPromptChars)||MAX_PROMPT_FALLBACK,
         paperTools:paperToolsOf(data),
@@ -611,14 +621,44 @@
       if(openMode()) return '로그인 없이 사용할 수 있습니다. 웹 실행 준비됨.';
       return state.session?'웹 실행 준비됨.':'웹 실행이 설정되어 있습니다. 로그인하면 실행할 수 있습니다.';
     }
+    function isLocalGeminiModel(model,caps){
+      if(!model) return false;
+      return model===GEMINI_BLUE_MODEL||!!(caps&&caps.modelProviders&&caps.modelProviders[model]==='agy-cli');
+    }
+    function currentRole(){
+      return nodes.role&&nodes.role.value==='blue'?'blue':'red';
+    }
+    function modelsForRole(caps,role){
+      if(!caps) return [];
+      if(role==='blue') return caps.models.slice();
+      return caps.models.filter(model=>!isLocalGeminiModel(model,caps));
+    }
+    function defaultModelForRole(caps,role){
+      const allowed=modelsForRole(caps,role);
+      if(role==='blue'&&caps.blueDefaultModel&&allowed.includes(caps.blueDefaultModel)) return caps.blueDefaultModel;
+      return allowed[0]||'';
+    }
+    function defaultEffortFor(caps,role,model){
+      if(isLocalGeminiModel(model,caps)) return GEMINI_BLUE_EFFORT;
+      if(role==='blue'&&caps.blueDefaultEffort&&caps.efforts.includes(caps.blueDefaultEffort)) return caps.blueDefaultEffort;
+      if(caps.efforts.includes('high')) return 'high';
+      return caps.efforts[0]||'';
+    }
     function applyCapabilities(caps){
       state.capabilities=caps;
       state.gate='ready';
-      state.model=caps.models.includes(state.model)?state.model:(caps.models[0]||'');
-      state.effort=caps.efforts.includes(state.effort)?state.effort
-        :(caps.efforts.includes('high')?'high':(caps.efforts[0]||''));
-      fillSelect(nodes.model,caps.models,'서버 기본값',caps.modelProviders);
-      fillSelect(nodes.effort,caps.efforts,'서버 기본값');
+      for(const role of ['red','blue']){
+        const allowed=modelsForRole(caps,role);
+        const priorModel=state.modelByRole[role];
+        const model=allowed.includes(priorModel)?priorModel:defaultModelForRole(caps,role);
+        state.modelByRole[role]=model;
+        state.effortByRole[role]=isLocalGeminiModel(model,caps)
+          ?GEMINI_BLUE_EFFORT
+          :(caps.efforts.includes(state.effortByRole[role])?state.effortByRole[role]:defaultEffortFor(caps,role,model));
+      }
+      state.renderedSelectRole='';
+      state.renderedSelectModel='';
+      syncRoleSelects(caps,currentRole());
       state.status=readyStatus();
       publishPaperTools(doc, caps.paperTools);
       announceCapabilities();
@@ -662,22 +702,25 @@
     function providerLabel(provider){
       return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS,provider)?PROVIDER_LABELS[provider]:String(provider);
     }
-    function fillFlatOptions(select,values){
-      for(const value of values) select.append(el('option',{value:value,textContent:value}));
+    function optionTextFor(value,labelFn){
+      return labelFn?labelFn(value):value;
     }
-    function fillGroupedOptions(select,values,modelProviders){
+    function fillFlatOptions(select,values,labelFn){
+      for(const value of values) select.append(el('option',{value:value,textContent:optionTextFor(value,labelFn)}));
+    }
+    function fillGroupedOptions(select,values,modelProviders,labelFn){
       const placed=new Set();
       for(const provider of PROVIDER_GROUP_ORDER){
         const members=values.filter(value=>modelProviders[value]===provider);
         if(!members.length) continue;
         const group=el('optgroup',{label:providerLabel(provider)});
-        fillFlatOptions(group,members);
+        fillFlatOptions(group,members,labelFn);
         select.append(group);
         for(const member of members) placed.add(member);
       }
-      fillFlatOptions(select,values.filter(value=>!placed.has(value)));
+      fillFlatOptions(select,values.filter(value=>!placed.has(value)),labelFn);
     }
-    function fillSelect(select,values,emptyLabel,modelProviders){
+    function fillSelect(select,values,emptyLabel,modelProviders,labelFn){
       if(!select) return;
       select.textContent='';
       if(!values.length){
@@ -685,9 +728,44 @@
         select.value='';
         return;
       }
-      if(modelProviders) fillGroupedOptions(select,values,modelProviders);
-      else fillFlatOptions(select,values);
+      if(modelProviders) fillGroupedOptions(select,values,modelProviders,labelFn);
+      else fillFlatOptions(select,values,labelFn);
       select.value=values.includes(select.value)?select.value:values[0];
+    }
+    function fillEffortSelect(caps,model){
+      if(!nodes.effort) return;
+      if(isLocalGeminiModel(model,caps)){
+        nodes.effort.textContent='';
+        nodes.effort.append(el('option',{value:GEMINI_BLUE_EFFORT,textContent:GEMINI_BLUE_EFFORT+' (고정)'}));
+        nodes.effort.value=GEMINI_BLUE_EFFORT;
+        return;
+      }
+      fillSelect(nodes.effort,caps.efforts,'서버 기본값');
+    }
+    function syncRoleSelects(caps,role){
+      if(!caps) return;
+      const allowed=modelsForRole(caps,role);
+      const model=allowed.includes(state.modelByRole[role])?state.modelByRole[role]:defaultModelForRole(caps,role);
+      const effort=isLocalGeminiModel(model,caps)
+        ?GEMINI_BLUE_EFFORT
+        :(caps.efforts.includes(state.effortByRole[role])?state.effortByRole[role]:defaultEffortFor(caps,role,model));
+      state.modelByRole[role]=model;
+      state.effortByRole[role]=effort;
+      state.model=model;
+      state.effort=effort;
+      const labelFn=role==='blue'&&caps.blueDefaultModel
+        ?(value=>value===caps.blueDefaultModel?value+' (기본)':value)
+        :null;
+      if(state.renderedSelectRole!==role){
+        fillSelect(nodes.model,allowed,'서버 기본값',caps.modelProviders,labelFn);
+      }
+      if(state.renderedSelectRole!==role||state.renderedSelectModel!==model){
+        fillEffortSelect(caps,model);
+      }
+      state.renderedSelectRole=role;
+      state.renderedSelectModel=model;
+      if(nodes.model) nodes.model.value=model;
+      if(nodes.effort) nodes.effort.value=effort;
     }
 
     /* ---------- session ---------- */
@@ -1164,10 +1242,17 @@
     function reviewInputs(){
       const role=nodes.role.value==='blue'?'blue':'red';
       const prompt=String(nodes.prompt.value||'').normalize('NFC').trim();
+      let model=selectedValue(nodes.model)||state.modelByRole[role]||state.model;
+      if(role==='red'&&isLocalGeminiModel(model,state.capabilities)){
+        model=defaultModelForRole(state.capabilities,'red');
+      }
+      const effort=isLocalGeminiModel(model,state.capabilities)
+        ?GEMINI_BLUE_EFFORT
+        :(selectedValue(nodes.effort)||state.effortByRole[role]||state.effort);
       return {
         role,prompt,
-        model:selectedValue(nodes.model)||state.model,
-        effort:selectedValue(nodes.effort)||state.effort,
+        model,
+        effort,
         useEvidence:state.useEvidence===true
       };
     }
@@ -1481,6 +1566,17 @@
       }
       fail(describe(error,'apply'));
     }
+    function resolvedApplyChoice(){
+      const redRole=currentRole()==='red';
+      const pickedModel=redRole?resolvedChoice(nodes.model,state.modelByRole.red):state.modelByRole.red;
+      const model=isLocalGeminiModel(pickedModel,state.capabilities)
+        ?defaultModelForRole(state.capabilities,'red')
+        :(pickedModel||defaultModelForRole(state.capabilities,'red'));
+      const effort=redRole&&!isLocalGeminiModel(pickedModel,state.capabilities)
+        ?resolvedChoice(nodes.effort,state.effortByRole.red)
+        :(state.effortByRole.red||defaultEffortFor(state.capabilities,'red',model));
+      return {model,effort};
+    }
     async function applySelection(){
       if(state.busy||state.gate!=='ready'||!state.capabilities) return;
       if(boothInsteadOfAi()){fail(BOOTH_NOTE);return;}
@@ -1492,8 +1588,7 @@
       const selectionProblem=applySelectionProblem(edits,visualEdits);
       if(selectionProblem){fail(selectionProblem);return;}
       const review=state.reviewJob,reviewUpload=state.reviewUpload;
-      const model=resolvedChoice(nodes.model,state.model);
-      const effort=resolvedChoice(nodes.effort,state.effort);
+      const {model,effort}=resolvedApplyChoice();
       state.busy='apply';state.error='';state.editedStatus='';
       setStatus('선택한 변경을 PDF에 적용하는 작업을 접수하는 중…');
       render();
@@ -2002,8 +2097,23 @@
 
       nodes.file.addEventListener('change',()=>{onFile();});
       nodes.role.addEventListener('change',()=>{render();});
-      nodes.model.addEventListener('change',()=>{state.model=nodes.model.value;render();});
-      nodes.effort.addEventListener('change',()=>{state.effort=nodes.effort.value;render();});
+      nodes.model.addEventListener('change',()=>{
+        const role=currentRole();
+        state.modelByRole[role]=nodes.model.value;
+        state.model=nodes.model.value;
+        if(isLocalGeminiModel(state.model,state.capabilities)){
+          state.effortByRole[role]=GEMINI_BLUE_EFFORT;
+          state.effort=GEMINI_BLUE_EFFORT;
+        }
+        render();
+      });
+      nodes.effort.addEventListener('change',()=>{
+        const role=currentRole();
+        const nextEffort=isLocalGeminiModel(state.model,state.capabilities)?GEMINI_BLUE_EFFORT:nodes.effort.value;
+        state.effortByRole[role]=nextEffort;
+        state.effort=nextEffort;
+        render();
+      });
       nodes.useEvidence.addEventListener('change',()=>{state.useEvidence=nodes.useEvidence.checked===true;render();});
       nodes.presetDefault.addEventListener('click',()=>{applyPreset('default');});
       nodes.presetP2.addEventListener('click',()=>{applyPreset('p2');});
@@ -2440,19 +2550,9 @@
       nodes.promptCount.textContent=count+' / '+max+'자';
       return {max,count};
     }
-    function selectedModelValue(caps){
-      if(caps.models.includes(state.model)) return state.model;
-      return caps.models[0]||'';
-    }
-    function selectedEffortValue(caps){
-      if(caps.efforts.includes(state.effort)) return state.effort;
-      if(caps.efforts.includes('high')) return 'high';
-      return caps.efforts[0]||'';
-    }
     function renderSelectValues(caps){
       if(!caps) return;
-      if(nodes.model) nodes.model.value=selectedModelValue(caps);
-      if(nodes.effort) nodes.effort.value=selectedEffortValue(caps);
+      syncRoleSelects(caps,currentRole());
     }
     function renderInputState(ctx){
       nodes.fileStatus.textContent=fileStatusText();
@@ -2485,11 +2585,14 @@
       setHidden(nodes.refresh,!refreshVisible(ctx,availability.activeJob));
     }
     function renderInputDisabled(ctx){
+      const role=currentRole();
+      const roleModels=ctx.caps?modelsForRole(ctx.caps,role):[];
+      const fixedEffort=isLocalGeminiModel(state.model,ctx.caps);
       nodes.file.disabled=!ctx.operate||ctx.busy;
       nodes.role.disabled=!ctx.operate||ctx.busy;
       nodes.prompt.disabled=!ctx.operate||ctx.busy;
-      nodes.model.disabled=!ctx.operate||ctx.busy||!ctx.caps||ctx.caps.models.length===0;
-      nodes.effort.disabled=!ctx.operate||ctx.busy||!ctx.caps||ctx.caps.efforts.length===0;
+      nodes.model.disabled=!ctx.operate||ctx.busy||!ctx.caps||roleModels.length===0;
+      nodes.effort.disabled=!ctx.operate||ctx.busy||!ctx.caps||ctx.caps.efforts.length===0||fixedEffort;
     }
     function renderJobSection(){
       setHidden(nodes.jobBox,!state.job);
@@ -2650,14 +2753,25 @@
       const res={schema:'falsify.document-blue.v1',revision,sourceHash,status:'ok',findings:entries.map(x=>x.finding)};
       return apis.lab.record('blue',docRecord,req,res,'manual-unverified',{});
     }
+    function emitHostedBlueResult(job,fileHash){
+      if(typeof doc?.dispatchEvent!=='function'||typeof CustomEvent!=='function') return;
+      try{
+        doc.dispatchEvent(new CustomEvent('falsify:hosted-blue-result',{
+          detail:{job:JSON.parse(JSON.stringify(job)),fileHash,fileName:currentSourceName('hosted.pdf')}
+        }));
+      }catch{}
+    }
     async function maybeRecordBlueLedger(){
       const job=state.job;
       if(!canRecordBlueJob(job)) return;
-      const apis=ledgerApis(),fileHash=currentFileHash();
-      if(!apis||!fileHash) return;
+      const fileHash=currentFileHash();
+      if(!fileHash) return;
       const rawFindings=acceptedBlueFindings().slice(0,12);
       if(!rawFindings.length&&!Array.isArray(job.result?.findings)) return;
       state.recordedJobs.add(job.id);
+      emitHostedBlueResult(job,fileHash);
+      const apis=ledgerApis();
+      if(!apis) return;
       try{
         const runId=await submitBlueLedger(job,apis,fileHash,rawFindings);
         if(typeof runId==='string'&&runId){state.lastLedgerRunId=runId;renderLedgerAction();}
@@ -2811,8 +2925,8 @@
       setHidden(nodes.config,!ctx.operate);
       if(!ctx.operate){emitHostedState(ctx,null);return;}
       const meta=renderPromptMeta(ctx);
-      renderInputState(ctx);
       applyBluePolicy();
+      renderInputState(ctx);
       renderOpenIntro();
       renderPresetControls(ctx);
       renderRestoreAction();
