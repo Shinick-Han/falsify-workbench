@@ -247,6 +247,13 @@ async function returnPass(browser, pageErrors) {
 async function offlineAndProgressPass(browser, pageErrors) {
   const state = newState();
   const {context, page} = await openContext(browser, PHONE, state, pageErrors);
+  // Each realm loads the shipped compatibility module independently.
+  const oldPromiseApis = 'delete Promise.withResolvers; delete Promise.try;';
+  await page.addInitScript(oldPromiseApis);
+  await context.route('**/vendor/pdf.worker.mjs', route => route.fulfill({
+    contentType: 'text/javascript',
+    body: oldPromiseApis + "await import('./pdf.worker.mjs?test-worker');",
+  }));
   state.hooks.config = async route => {
     state.hooks.config = null;
     await setOffline(context, state, true);

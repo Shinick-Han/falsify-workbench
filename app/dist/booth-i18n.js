@@ -300,7 +300,7 @@
     'PDF를 읽지 못했어요. 다른 논문을 골라 주세요.':'Could not read this PDF. Please pick another paper.',
     '편집할 텍스트가 없는 스캔 PDF예요. 다른 논문을 골라 주세요.':'This scanned PDF has no editable text. Please pick another paper.',
     '논문을 여는 시간이 길어졌어요. 같은 논문을 눌러 다시 열어 보세요.':'Opening this paper timed out. Select it again to retry.',
-    'PDF를 열지 못했어요. 같은 논문을 눌러 다시 열어 보세요.':'Could not open this PDF. Select the paper again to retry.',
+    '파일을 읽었지만 PDF 뷰어에서 열지 못했어요.':'The file was received, but the PDF viewer could not open it.',
     '수정본이 중간에 바뀌었어요. 「다시 시도」를 눌러 주세요.':'The edited copy changed mid-submit. Please tap Try again.',
     '아직 원본과 같아요. 한 곳 이상 고친 뒤 「다음」을 눌러 주세요.':'No changes detected yet. Edit at least one place before tapping Next.',
     '연결이 잠시 끊겼어요. 「다시 시도」를 누르면 새로 연결해요.':'Connection dropped briefly. Tap Try again to reconnect.',
