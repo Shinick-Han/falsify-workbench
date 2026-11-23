@@ -1,0 +1,22 @@
+# Falsify Workbench private Google Drive PDF archive (user systemd unit).
+# Install to ~/.config/systemd/user/falsify-w8-pdf-store.service and replace <release-id>
+# with the versioned release directory staged from a clean git commit (never a mutable worktree).
+# Local-only secrets and operator Drive bindings (W8_PDF_STORE_TOKEN,
+# RCLONE_CONFIG_DRIVE_ROOT_FOLDER_ID) live in ~/.local/state/falsify/w8-drive-archive/store.env.
+[Unit]
+Description=Falsify Workbench private Google Drive PDF archive
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/falsify/releases/<release-id>
+ExecStart=/usr/bin/python3 tools/w8/pdf_store.py
+EnvironmentFile=%h/.local/state/falsify/w8-drive-archive/store.env
+Environment=W8_PDF_STATE_DIR=%h/.local/state/falsify/w8-drive-archive
+Environment=W8_PDF_DRIVE=drive:
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+UMask=0077
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

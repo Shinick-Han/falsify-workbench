@@ -1,0 +1,29 @@
+# Falsify local Gemini 4 Neon high broker (Unix socket behind falsify-production.service).
+# Install to /etc/systemd/system/falsify-agy-broker.service and replace <release-id> and
+# <operator-user> (the local account holding the operator's agy login) before reloading systemd.
+# Secrets and local credentials stay outside this repository.
+[Unit]
+Description=Falsify local Gemini 4 Neon high inference
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<operator-user>
+Group=falsify-production
+WorkingDirectory=/opt/falsify/releases/<release-id>/app/local
+Environment=PATH=/home/<operator-user>/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/<operator-user>
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/falsify/venv/bin/python -m agy_broker --socket /run/falsify-agy/blue.sock --socket-group falsify-production --socket-mode 0660 --max-concurrency 15
+RuntimeDirectory=falsify-agy
+RuntimeDirectoryMode=0750
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

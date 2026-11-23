@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import re
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +20,8 @@ from .evidence import (EvidenceError, apply_edits as apply_evidence_edits,
                        configure_store, handle as evidence_handle,
                        prepare as prepare_evidence, release_store)
 from .pdf_input import PdfInputError, extract_pdf
-from .store import (IdempotencyConflict, JobIdConflict, Store, StoreError,
-                    StoreNotFound)
+from .store import (IdempotencyConflict, JobIdConflict, RuntimeBusy, Store,
+                    StoreError, StoreNotFound)
 
 JOB_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_:-]{0,127}')
 OWNER_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9:_.-]{0,199}')
@@ -44,6 +46,7 @@ ERROR_MESSAGES = {
     'paper_tools_disabled': 'Paper tools are disabled.',
     'paper_path_unsupported': 'This paper path is not supported.',
     'paper_busy': 'The paper runtime is busy.',
+    'runtime_busy': 'The AI runtime is busy.',
     'upload_empty': 'The uploaded file is empty.',
     'unsupported_media_type': 'This file type is not supported.',
     'method_not_allowed': 'This HTTP method is not allowed.',
@@ -92,7 +95,7 @@ FAILURE_MESSAGES = {
     'visual_edit_kind_unsupported': 'This visual edit kind is not supported for apply.',
 }
 RETRYABLE_FAILURES = frozenset({'rate_limited', 'timeout', 'provider_error', 'overloaded', 'provider_unavailable'})
-RETRYABLE_ERRORS = frozenset({'ai_unavailable'})
+RETRYABLE_ERRORS = frozenset({'ai_unavailable', 'runtime_busy'})
 _PROVIDER_KEY_ENV = {'anthropic': 'ANTHROPIC_API_KEY', 'openai': 'OPENAI_API_KEY'}
 
 
@@ -175,6 +178,18 @@ def _clean_progress(value):
     return {'completedCalls': completed, 'requiredCalls': required, 'phase': phase}
 
 
+def _planned_calls(coverage):
+    planned = _count(coverage.get('requiredCalls'))
+    if planned is not None:
+        return planned
+    text_batches = _count(coverage.get('textBatches'))
+    image_batches = _count(coverage.get('imageBatches'))
+    if text_batches is not None and image_batches is not None:
+        return text_batches * image_batches
+    batches = _count(coverage.get('batches'))
+    return batches if batches is not None else _count(coverage.get('chunks'))
+
+
 def _terminal_progress(result, terminal, *, apply_only=False):
     """Derive final progress from review coverage; omit unknown counts rather than inventing them."""
     if apply_only:
@@ -188,14 +203,7 @@ def _terminal_progress(result, terminal, *, apply_only=False):
     actual = _count(coverage.get('calls'))
     if terminal == 'completed':
         progress['phase'] = 'partial' if coverage.get('complete') is False else 'completed'
-        text_batches = _count(coverage.get('textBatches'))
-        image_batches = _count(coverage.get('imageBatches'))
-        if text_batches is not None and image_batches is not None:
-            total = text_batches * image_batches
-        else:
-            total = _count(coverage.get('batches'))
-            if total is None:
-                total = _count(coverage.get('chunks'))
+        total = _planned_calls(coverage)
         if actual is not None:
             progress['completedCalls'] = actual
         if total is not None:
@@ -206,7 +214,10 @@ def _terminal_progress(result, terminal, *, apply_only=False):
 
 
 def _harness_identity(model):
-    if provider_for_model(model) == 'openai':
+    provider = provider_for_model(model)
+    if provider == 'agy-cli':
+        return 'local-agy', 'Local Gemini (agy)'
+    if provider == 'openai':
         return 'hosted-openai', 'Hosted OpenAI'
     return 'hosted-anthropic', 'Hosted Anthropic'
 
@@ -221,7 +232,7 @@ def _provider_key_configured(provider):
 
 def _job_provider(model):
     provider = provider_for_model(model)
-    if provider not in ('anthropic', 'openai'):
+    if provider is None:
         raise ServiceError('invalid_request', 400)
     return provider
 
@@ -396,7 +407,8 @@ def _job_upload_id(body):
 
 
 def _job_model(config, body):
-    model = body.get('model', config.default_model)
+    blue_default = config.blue_default_model if body.get('role') == 'blue' else None
+    model = body.get('model', blue_default or config.default_model)
     _require(isinstance(model, str) and model in config.models)
     effort = body.get('effort', config.default_effort)
     _require(isinstance(effort, str) and effort in EFFORTS and effort in config.efforts)
@@ -580,7 +592,7 @@ class RuntimeService:
         return result, created
 
     # ---------------------------------------------------------------------- jobs
-    def submit_job(self, body, owner_id=None):
+    def submit_job(self, body, owner_id=None, *, require_slot=False):
         validated = self._validate_job(body, owner_id)
         owner = validated['owner_id']
         try:
@@ -606,11 +618,14 @@ class RuntimeService:
                 apply_only=validated['applyOnly'],
                 use_evidence=validated['useEvidence'],
                 upload_id=upload['id'],
+                max_active_jobs=self.config.max_concurrency if require_slot else None,
             )
         except IdempotencyConflict:
             raise ServiceError('idempotency_conflict', 409) from None
         except JobIdConflict:
             raise ServiceError('job_id_conflict', 409) from None
+        except RuntimeBusy:
+            raise ServiceError('runtime_busy', 429) from None
         if not created:
             return self.snapshot(job), True
         request = _JobRequest(
@@ -739,7 +754,7 @@ class RuntimeService:
                 self._finish_cancelled(request, usage=getattr(error, 'usage', None),
                                        provider_request_id=getattr(error, 'request_id', None))
             else:
-                self._fail(request, _classify_engine_error(error))
+                self._fail(request, _classify_engine_error(error, request.job_id))
         finally:
             with self._lock:
                 self._events.pop(request.job_id, None)
@@ -910,7 +925,8 @@ class RuntimeService:
         """Real engines only. Injected runners stay offline and do not read provider keys."""
         if self.review_runner is not None:
             return False
-        return not _provider_key_configured(provider_for_model(request.model))
+        provider = provider_for_model(request.model)
+        return provider != 'agy-cli' and not _provider_key_configured(provider)
 
     def _run_engine(self, data, request):
         progress = self._progress_callback(request)
@@ -921,6 +937,9 @@ class RuntimeService:
         kwargs = {}
         if self.backend_factory is not None:
             kwargs['backend_factory'] = self.backend_factory
+        if (request.role == 'blue' and self.config.agy_socket is not None
+                and provider_for_model(request.model) == 'agy-cli'):
+            kwargs['agy_socket'] = self.config.agy_socket
         return module.run_review(data, progress, request.cancelled, **kwargs)
 
     def _progress_callback(self, request):
@@ -997,6 +1016,8 @@ class RuntimeService:
         prompt = _job_prompt(body, apply_only, self.config.max_prompt_chars)
         upload_id = _job_upload_id(body)
         model, effort = _job_model(self.config, body)
+        if provider_for_model(model) == 'agy-cli':
+            _require(role == 'blue' and effort == 'high')
         max_calls = _job_budget(body, apply_only, self.config.max_calls)
         _job_harness(body)
         edits, visual_edits = _job_edits(body, role, apply_only)
@@ -1047,10 +1068,16 @@ class RuntimeService:
         return False
 
 
-def _classify_engine_error(error):
+def _classify_engine_error(error, job_id=None):
     code = getattr(error, 'code', None) or getattr(error, 'error_code', None)
     if code in FAILURE_MESSAGES:
         return code
     if isinstance(error, TimeoutError):
         return 'timeout'
+    if job_id and error.__traceback__ is not None:
+        frame = traceback.extract_tb(error.__traceback__, limit=-1)[0]
+        # Provider messages and local variables can contain the submitted paper.
+        logging.getLogger(__name__).warning('review engine error job=%s exception=%s at %s:%d %s',
+                                            job_id, type(error).__name__, Path(frame.filename).name,
+                                            frame.lineno, frame.name)
     return 'engine_error'

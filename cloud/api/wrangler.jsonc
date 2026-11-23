@@ -33,17 +33,19 @@
     "AI_DEFAULT_CALLS": "12",
     "AI_UPLOADS_PER_OWNER_HOUR": "60",
     "AI_JOBS_PER_OWNER_HOUR": "20",
-    "AI_ACTIVE_JOBS_PER_OWNER": "3",
+    "AI_ACTIVE_JOBS_PER_OWNER": "15",
     // Owner-paid policy. The token budget gates NEW model-call jobs on usage recorded from terminal
     // snapshots in the current window; 0 disables it. It is a policy limit, not an exact provider
     // balance, and apply-only edit jobs (no model calls) are never blocked by it.
     "AI_OWNER_TOKEN_BUDGET": "0",
     "AI_TOKEN_WINDOW_SECONDS": "86400",
     // Main Pages app is open: guests need no login and no access key. Caps bound the operator cost;
-    // AI_OPEN_ACCESS=false is the kill switch. Claude and OpenAI ids match the runtime HOSTED_AI_MODELS.
+    // AI_OPEN_ACCESS=false is the kill switch. Claude, OpenAI and BLUE-only local Gemini (agy-cli)
+    // ids match the runtime HOSTED_AI_MODELS.
     "AI_OPEN_ACCESS": "true",
     "AI_PAPER_TOOLS_ENABLED": "true",
-    "AI_MODELS": "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5,gpt-6.2-astra,gpt-5.5,gpt-5.4-mini",
+    "AI_MODELS": "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5,gpt-6.2-astra,gpt-5.5,gpt-5.4-mini,gemini-4-neon-high",
+    "AI_BLUE_DEFAULT_MODEL": "gemini-4-neon-high",
     "AI_GUEST_SESSION_SECONDS": "21600",
     "AI_GUESTS_PER_IP_HOUR": "20",
     "AI_GUESTS_PER_HOUR": "300",

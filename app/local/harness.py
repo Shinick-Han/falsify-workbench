@@ -47,6 +47,8 @@ def _hosted_model(adapter):
 def _hosted_api_provider(model):
     from hosted_runtime.config import provider_for_model
     kind = provider_for_model(model)
+    if kind == 'agy-cli':
+        return kind
     if kind == 'anthropic':
         return 'anthropic-api'
     if kind == 'openai':
@@ -169,30 +171,42 @@ def record(value):
     selected = selection(value)
     if selected is None:
         return {}
-    key = 'hostedSelection' if selected['provider'] in ('anthropic-api', 'openai-api') else 'cliSelection'
+    key = 'hostedSelection' if value['adapter']['type'] == 'hosted' else 'cliSelection'
     return {key: dict(selected)}
 
+def _select_factory(provider, default_factory, claude_factory, hosted_factory, openai_factory, agy_factory):
+    if provider == 'codex':
+        return default_factory
+    if provider == 'agy-cli':
+        if agy_factory is None:
+            from agy_backend import AgyBackend as agy_factory
+        return agy_factory
+    if provider == 'anthropic-api':
+        if hosted_factory is None:
+            from anthropic_backend import AnthropicBackend as hosted_factory
+        return hosted_factory
+    if provider == 'openai-api':
+        if openai_factory is None:
+            from openai_backend import OpenAIBackend as openai_factory
+        return openai_factory
+    if claude_factory is None:
+        from cli_backend import ClaudeBackend as claude_factory
+    return claude_factory
+
 def backend(data, role, required, default_factory, claude_factory=None, limits=None, hosted_factory=None,
-            openai_factory=None):
+            openai_factory=None, agy_factory=None):
     value, _ = resolve(data, role)
     if builtin(value):
         selected = selection(value)
         limits = {'max_calls': required, 'timeout_seconds': 180, 'max_prompt_chars': 100000, **(limits or {})}
         if selected is None:  # Legacy default: identical constructor call.
             return default_factory(**limits)
-        if selected['provider'] == 'anthropic-api':
-            if hosted_factory is None:
-                from anthropic_backend import AnthropicBackend as hosted_factory
-            return hosted_factory(**limits, model=selected['model'], effort=selected['effort'])
-        if selected['provider'] == 'openai-api':
-            if openai_factory is None:
-                from openai_backend import OpenAIBackend as openai_factory
-            return openai_factory(**limits, model=selected['model'], effort=selected['effort'])
-        if selected['provider'] == 'codex':
-            return default_factory(**limits, model=selected['model'], effort=selected['effort'])
-        if claude_factory is None:
-            from cli_backend import ClaudeBackend as claude_factory
-        return claude_factory(**limits, model=selected['model'], effort=selected['effort'])
+        if selected['provider'] == 'agy-cli' and (role != 'blue' or selected['effort'] != 'high'):
+            raise ValueError('Local Gemini BLUE requires high effort')
+        factory = _select_factory(
+            selected['provider'], default_factory, claude_factory, hosted_factory, openai_factory, agy_factory,
+        )
+        return factory(**limits, model=selected['model'], effort=selected['effort'])
     if data.get('executionConsent') is not True:
         raise ValueError('사용자 코드 실행 / 외부 전송에 대한 별도 동의가 필요합니다.')
     if value['adapter']['type'] == 'wrapper':

@@ -36,7 +36,11 @@ const ROLES = ['red', 'blue'];
 const STATES = ['queued', 'running', 'cancelling', 'cancelled', 'completed', 'failed', 'interrupted'];
 const DEFAULT_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
 const DEFAULT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-const SNAPSHOT_PROVIDERS = ['anthropic', 'openai'];
+const GEMINI_BLUE_MODEL = 'gemini-4-neon-high';
+const GEMINI_BLUE_PROVIDER = 'agy-cli';
+const GEMINI_BLUE_EFFORT = 'high';
+const SNAPSHOT_PROVIDERS = ['anthropic', 'openai', GEMINI_BLUE_PROVIDER];
+const GUEST_AUTH_HEADER = /^Bearer fsg_[A-Za-z0-9_-]{43}$/;
 // Fixed upload allowlist. Anything else is 415 before a byte is forwarded.
 const MIME_TYPES = ['application/pdf', 'application/octet-stream', 'text/plain'];
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -91,13 +95,51 @@ function csv(value, fallback, pattern) {
   return items.length ? [...new Set(items)] : fallback.slice();
 }
 
-// claude-* is anthropic. gpt-* and o<digit>* (o3, o3-mini) are openai. Anything else is not a provider.
+// claude-* is anthropic. gpt-* and o<digit>* (o3, o3-mini) are openai.
+// Only the exact gemini-4-neon-high id maps to agy-cli (BLUE-only). Anything else is not a provider.
 export function providerForModel(model) {
   if (typeof model !== 'string') return null;
+  if (model === GEMINI_BLUE_MODEL) return GEMINI_BLUE_PROVIDER;
   if (model.startsWith('claude-')) return 'anthropic';
   if (model.startsWith('gpt-')) return 'openai';
   if (/^o\d/.test(model)) return 'openai';
   return null;
+}
+
+function isBlueOnlyModel(model) {
+  return model === GEMINI_BLUE_MODEL;
+}
+
+function roleModels(settings, role) {
+  return role === 'blue' ? settings.models : settings.models.filter(model => !isBlueOnlyModel(model));
+}
+
+function exactPreviewOrigin(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return '';
+  try {
+    const url = new URL(text);
+    return url.protocol === 'https:' && url.origin === text ? text : '';
+  } catch {
+    return '';
+  }
+}
+
+export function aiPreviewOrigin(env) {
+  return exactPreviewOrigin(env?.AI_PREVIEW_ORIGIN) || exactPreviewOrigin(env?.WORKBENCH_PREVIEW_ORIGIN);
+}
+
+// Optional exact preview origin is allowed ONLY on /v1/ai/* when open access is on,
+// and ONLY for CORS preflight, unsigned public/guest-mint requests, or guest (fsg_) bearers.
+export function isAiPreviewOriginAllowed(env, origin, request, match) {
+  if (!match || typeof origin !== 'string' || !origin) return false;
+  if (!openAccessEnabled(env)) return false;
+  const preview = aiPreviewOrigin(env);
+  if (!preview || origin !== preview) return false;
+  if (request?.method === 'OPTIONS') return true;
+  const auth = request?.headers?.get('Authorization');
+  if (auth === null || auth === undefined) return true;
+  return GUEST_AUTH_HEADER.test(auth);
 }
 
 // Tokens with no provider are dropped. An explicit AI_MODELS list that matches the token pattern
@@ -137,9 +179,16 @@ export function aiSettings(env) {
   const maxCallsPerJob = Math.min(positiveInt(env?.AI_MAX_CALLS_PER_JOB, 24), 64);
   const maxUploadBytes = Math.min(positiveInt(env?.AI_MAX_UPLOAD_BYTES, 32 * 1024 * 1024), MAX_UPLOAD_BOUND);
   const models = listedModels(env?.AI_MODELS);
+  const redModels = models.filter(model => !isBlueOnlyModel(model));
   const efforts = csv(env?.AI_EFFORTS, DEFAULT_EFFORTS, EFFORT_TOKEN);
-  const requestedModel = String(env?.AI_DEFAULT_MODEL || '');
-  const requestedEffort = String(env?.AI_DEFAULT_EFFORT || '');
+  const requestedModel = String(env?.AI_DEFAULT_MODEL || '').trim();
+  const requestedBlueModel = String(env?.AI_BLUE_DEFAULT_MODEL || '').trim();
+  const requestedEffort = String(env?.AI_DEFAULT_EFFORT || '').trim();
+  const defaultModel = redModels.includes(requestedModel) ? requestedModel : (redModels[0] || '');
+  const blueDefaultConfigured = Boolean(requestedBlueModel && models.includes(requestedBlueModel));
+  const blueDefaultModel = blueDefaultConfigured ? requestedBlueModel : (defaultModel || models[0] || '');
+  const defaultEffort = efforts.includes(requestedEffort) ? requestedEffort : (efforts.includes('high') ? 'high' : efforts[0]);
+  const blueDefaultEffort = isBlueOnlyModel(blueDefaultModel) ? GEMINI_BLUE_EFFORT : defaultEffort;
   return {
     enabled: hostingEnabled(env),
     maxUploadBytes,
@@ -192,8 +241,11 @@ export function aiSettings(env) {
     guestTokenBudget: nonNegativeInt(env?.AI_GUEST_TOKEN_BUDGET, 0),
     models,
     efforts,
-    defaultModel: models.includes(requestedModel) ? requestedModel : (models[0] || ''),
-    defaultEffort: efforts.includes(requestedEffort) ? requestedEffort : (efforts.includes('high') ? 'high' : efforts[0]),
+    defaultModel,
+    defaultEffort,
+    blueDefaultConfigured,
+    blueDefaultModel,
+    blueDefaultEffort,
     mimeTypes: MIME_TYPES.slice(),
     paperTools: paperToolsEnabled(env),
     paperMaxBodyBytes: Math.min(positiveInt(env?.AI_PAPER_MAX_BODY_BYTES, 29360128), 64 * 1024 * 1024),
@@ -574,6 +626,10 @@ function capabilitiesResponse(settings, operatorView = false) {
       : operatorView || !(settings.openAccess === true && settings.guestModelJobs === false),
   };
   if (settings.paperTools) body.paperTools = { enabled: true };
+  if (settings.blueDefaultConfigured || isBlueOnlyModel(settings.blueDefaultModel)) {
+    body.blueDefaultModel = settings.blueDefaultModel;
+    body.blueDefaultEffort = settings.blueDefaultEffort;
+  }
   return json(200, body);
 }
 
@@ -810,18 +866,21 @@ function keysWithin(value, allowed) {
   return !Object.keys(value).some(key => !allowed.includes(key));
 }
 
-function validateHarnessAdapter(adapter, settings) {
+function validateHarnessAdapter(adapter, settings, role) {
   if (!isObject(adapter) || !keysWithin(adapter, HARNESS_ADAPTER_KEYS)) aiFail(400, 'invalid_request');
   if (adapter.type !== 'hosted') aiFail(400, 'invalid_request');
-  if (adapter.model !== undefined && !settings.models.includes(adapter.model)) aiFail(400, 'invalid_request');
-  if (adapter.effort !== undefined && !settings.efforts.includes(adapter.effort)) aiFail(400, 'invalid_request');
+  if (adapter.model !== undefined && !roleModels(settings, role).includes(adapter.model)) aiFail(400, 'invalid_request');
+  if (adapter.effort !== undefined) {
+    const geminiEffort = isBlueOnlyModel(adapter.model) && adapter.effort === GEMINI_BLUE_EFFORT;
+    if (!settings.efforts.includes(adapter.effort) && !geminiEffort) aiFail(400, 'invalid_request');
+  }
 }
 
 function validateHarness(value, { role, prompt, maxCalls, model, effort, settings }) {
   const canonical = {
     schema: 'falsify.harness.v1',
-    id: 'hosted-anthropic',
-    name: 'Hosted Anthropic',
+    id: model === GEMINI_BLUE_MODEL ? 'local-agy' : 'hosted-anthropic',
+    name: model === GEMINI_BLUE_MODEL ? 'Local Gemini (agy)' : 'Hosted Anthropic',
     version: '1',
     role,
     instructions: prompt,
@@ -832,7 +891,7 @@ function validateHarness(value, { role, prompt, maxCalls, model, effort, setting
   if (!isObject(value) || !keysWithin(value, HARNESS_KEYS)) aiFail(400, 'invalid_request');
   if (value.schema !== undefined && value.schema !== 'falsify.harness.v1') aiFail(400, 'invalid_request');
   if (value.role !== undefined && value.role !== role) aiFail(400, 'invalid_request');
-  if (value.adapter !== undefined) validateHarnessAdapter(value.adapter, settings);
+  if (value.adapter !== undefined) validateHarnessAdapter(value.adapter, settings, role);
   return canonical;
 }
 
@@ -1034,11 +1093,25 @@ function normalizePrompt(body, settings) {
   return prompt;
 }
 
-function selectJobModel(body, settings) {
-  const model = body.model === undefined ? settings.defaultModel : body.model;
-  const effort = body.effort === undefined ? settings.defaultEffort : body.effort;
-  if (typeof model !== 'string' || !settings.models.includes(model)) aiFail(400, 'invalid_request');
+function resolveJobEffort(requested, settings, gemini) {
+  if (requested !== undefined) {
+    if (typeof requested !== 'string') aiFail(400, 'invalid_request');
+    if (!settings.efforts.includes(requested) && !(gemini && requested === GEMINI_BLUE_EFFORT)) {
+      aiFail(400, 'invalid_request');
+    }
+  }
+  if (gemini) return GEMINI_BLUE_EFFORT;
+  const effort = requested === undefined ? settings.defaultEffort : requested;
   if (typeof effort !== 'string' || !settings.efforts.includes(effort)) aiFail(400, 'invalid_request');
+  return effort;
+}
+
+function selectJobModel(body, settings) {
+  const allowed = roleModels(settings, body.role);
+  const fallbackModel = body.role === 'blue' ? settings.blueDefaultModel : settings.defaultModel;
+  const model = body.model === undefined ? fallbackModel : body.model;
+  if (typeof model !== 'string' || !allowed.includes(model)) aiFail(400, 'invalid_request');
+  const effort = resolveJobEffort(body.effort, settings, isBlueOnlyModel(model));
   return { model, effort };
 }
 

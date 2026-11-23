@@ -2,7 +2,7 @@
 import json
 import hashlib
 from harness_adapter import cli_failure
-from harness import resolve, guidance, backend, model_label, builtin, record
+from harness import resolve, guidance, backend, model_label, builtin, record, selection
 from red_service import (CodexBackend, ClaudeBackend, strict_object, STRING, EVIDENCE, SCAN,
                          evidence_check, validate_request as validate_document, _match_offsets,
                          ReviewCancelled)
@@ -48,6 +48,8 @@ WINDOW = MAX_CONTEXT // MAX_TARGETS
 INDEX_BUDGET, INDEX_PART = 30000, 6000
 TARGET = strict_object({'segmentId': STRING, 'anchor': STRING, 'reason': STRING})
 SELECTION = strict_object({'status': STATUS, 'targets': {'type': 'array', 'items': TARGET, 'maxItems': MAX_TARGETS}})
+_HOSTED_SCAN = strict_object({'status': STATUS, 'summary': STRING,
+                              'evidence': {'type': 'array', 'items': EVIDENCE}})
 REREAD = {
     'not-needed': '단일 청크: 한 번의 호출에 전체 추출 원문이 그대로 전달되어 별도 재독이 필요 없음.',
     'completed': '선택된 문단의 기준 인용 주변 원문 창(대상당 최대 6,000자)을 최종 판단 직전에 그대로 다시 전달함. 대상 선택은 모델 판단이며 전체 원문 재독·결함 전수 탐지 보증 아님.',
@@ -606,7 +608,9 @@ def _first_review_prompts(policy, final, chunks, limits=None):
         first = [policy + final + 'Use only quotations supplied here. Abstain where the evidence is insufficient. '
             + json.dumps({'segments': chunks[0]}, ensure_ascii=False)]
     else:
-        first = [policy + 'Read every fragment, summarize claims and qualifications in <=2500 chars. '
+        first = [policy + 'This is the note-taking stage. Summarize the supplied fragment in <=2500 chars. '
+            'For a readable fragment without claims or useful excerpts, describe its contents with status ok '
+            'and empty evidence. Reserve the overall verdict and findings for the final stage. '
             'Quote up to four exact excerpts (<=600 chars each), including possible inconsistencies. '
             + json.dumps({'part': i+1, 'parts': len(chunks), 'segments': chunk}, ensure_ascii=False) for i, chunk in enumerate(chunks)]
     if any(len(p) > max_prompt for p in first):
@@ -713,8 +717,9 @@ def _invoke_blue_call(engine, prompt, schema, call_images, call_refs, cancelled,
 
 def _scan_chunks(first, source, invoke, hosted=False):
     notes = []
+    scan_schema = _HOSTED_SCAN if hosted else SCAN
     for i, prompt in enumerate(first):
-        note = invoke(prompt, SCAN, 'reviewing')
+        note = invoke(prompt, scan_schema, 'reviewing')
         if note['status'] != 'ok':
             return None, note['status'], i + 1
         if hosted:
@@ -723,6 +728,8 @@ def _scan_chunks(first, source, invoke, hosted=False):
                 summary = summary[:2499].rstrip() + '…'
             valid_evidence = []
             for item in note.get('evidence') or []:
+                if len(valid_evidence) >= 4:
+                    break
                 try:
                     evidence_check([item], source, 600)
                 except (KeyError, TypeError, ValueError):
@@ -798,6 +805,8 @@ def _run_multi_chunk(data, structured, images, initial_refs, first, chunks, poli
 
 
 def _selection_schema(limits):
+    if limits['hosted']:
+        return strict_object({'status': STATUS, 'targets': {'type': 'array', 'items': TARGET}})
     if limits['blue_max_targets'] == MAX_TARGETS:
         return SELECTION
     return strict_object({'status': STATUS,
@@ -923,7 +932,7 @@ def _hosted_blue_result(data, text_batches, image_groups, completed, accepted, r
     status, model_status, complete = _hosted_batch_outcome(
         statuses, accepted, rejected, unresolved, all_pairs_attempted)
     remaining = _hosted_remaining_batches(text_batches, image_groups, completed)
-    provider = {'id': 'anthropic-api', 'models': sorted(provider_state['models']),
+    provider = {'id': selection(harness)['provider'], 'models': sorted(provider_state['models']),
                 'requestId': provider_state['request_id']}
     coverage = {'complete': complete, 'calls': completed, 'textBatches': len(text_batches),
                 'imageBatches': len(image_groups), 'completedPairs': completed,
@@ -986,7 +995,8 @@ def _run_hosted_blue(data, text_batches, images, initial_refs, policy, final, in
                                statuses, limits, harness, harness_hash, usage_totals, provider_state, images,
                                visual_observations, structured=structured)
 
-def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend, hosted_factory=None):
+def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_factory=ClaudeBackend,
+               hosted_factory=None, agy_socket=None):
     mode, chunks, required, structured, harness, harness_hash, images, limits = _plan_review(data)
     allow_occ = data.get('allowOccurrenceTargeting') is True
     schema = RESULT if not limits['hosted'] and not allow_occ else result_schema(limits, allow_occ)
@@ -1014,6 +1024,10 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
     backend_limits = {'max_prompt_chars': limits['blue_max_prompt'], 'timeout_seconds': limits['timeout_seconds']}
     if limits['hosted']:
         backend_limits.update(max_tokens=limits['provider_max_tokens'], max_images=limits['image_capacity'])
+        if selection(harness)['provider'] == 'agy-cli':
+            backend_limits['cancelled'] = cancelled.is_set
+            if agy_socket is not None:
+                backend_limits['socket_path'] = agy_socket
     engine = backend(data, 'blue', required, backend_factory, claude_factory,
                     limits=backend_limits, hosted_factory=hosted_factory)
     budget = min(int(data['maxCalls']), int(harness['maxCalls']))
@@ -1031,7 +1045,8 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
     visual_observations = []
     def finish(status, findings, completed, reread, complete=True, windows=(), selected_items=None, auto_crops=0,
                used_visual=False, rejected=(), unresolved=(), model_status=None):
-        coverage = {'complete': complete, 'calls': calls, 'chunks': len(chunks), 'completedChunks': completed, 'reread': reread,
+        coverage = {'complete': complete, 'calls': calls, 'requiredCalls': required, 'chunks': len(chunks),
+                    'completedChunks': completed, 'reread': reread,
                     'rereadWindows': [{'segmentId': w['segmentId'], 'start': w['start'], 'end': w['end']} for w in windows],
                     'resultCoverage': {'accepted': len(findings), 'rejected': len(rejected), 'unresolved': len(unresolved),
                                        'rejectedItems': list(rejected), 'unresolvedItems': list(unresolved)}}
@@ -1045,7 +1060,7 @@ def run_review(data, progress, cancelled, backend_factory=CodexBackend, claude_f
                 'verification': 'custom-script-unverified',
                 'meaning': '사용자 코드의 외부 문헌 조회 허용. 실제 조회 성공·범위는 harness 감사기록에서 확인; 앱이 독립 검증하지 않음.'}
         extra = {'visualObservations': visual_observations, 'visualScope': 'Image bytes and hashes verified; PDF and extracted text association is client-declared; image interpretation is unverified.'} if used_visual else {}
-        provider = {'id': 'anthropic-api' if limits['hosted'] else 'cli', 'models': sorted(provider_state['models']),
+        provider = {'id': selection(harness)['provider'] if limits['hosted'] else 'cli', 'models': sorted(provider_state['models']),
                     'requestId': provider_state['request_id']}
         return {**extra, 'schema': VERSION, 'revision': data['revision'], 'sourceHash': data['sourceHash'], 'status': status, 'findings': findings,
             'usage': usage_totals, 'provider': provider,

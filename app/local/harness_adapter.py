@@ -90,7 +90,8 @@ def cli_failure(code):
              'permission_denied': 'provider_rejected', 'request_too_large': 'provider_rejected',
              'not_found': 'provider_rejected', 'invalid_request': 'provider_rejected',
              'FileNotFoundError': 'executable_missing', 'timeout': 'timeout', 'output_limit': 'invalid_output',
-             'response_not_object': 'invalid_output', 'protocol_violation': 'invalid_output'}
+             'response_not_object': 'invalid_output', 'protocol_violation': 'invalid_output',
+             'invalid_output': 'invalid_output'}
     return AdapterFailure(codes.get(code, 'unknown'))
 
 def invocation(harness, prompt, schema, call, max_calls):

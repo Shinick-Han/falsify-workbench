@@ -153,6 +153,35 @@ class RuntimeConfigTests(unittest.TestCase):
                     RuntimeConfig(state_dir=Path(directory), service_token=TOKEN,
                                   max_prompt_chars=value)
 
+    def test_agy_socket_config_optional_and_nonconfigured_defaults_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            default_cfg = RuntimeConfig.from_env({
+                'HOSTED_AI_STATE_DIR': directory,
+                'HOSTED_AI_SERVICE_TOKEN': TOKEN,
+            })
+            self.assertEqual(default_cfg.models, DEFAULT_MODELS)
+            self.assertEqual(default_cfg.default_model, 'claude-opus-5-5')
+            self.assertEqual(default_cfg.provider, 'anthropic')
+            self.assertIsNone(default_cfg.agy_socket)
+            self.assertEqual(default_cfg.public_health(True)['providers'], ['anthropic'])
+
+            sock_path = os.path.join(directory, 'agy-broker.sock')
+            configured = RuntimeConfig.from_env({
+                'HOSTED_AI_STATE_DIR': directory,
+                'HOSTED_AI_SERVICE_TOKEN': TOKEN,
+                'HOSTED_AI_MODELS': 'claude-opus-5-5,gemini-4-neon-high',
+                'HOSTED_AI_AGY_SOCKET': sock_path,
+            })
+            self.assertEqual(configured.agy_socket, sock_path)
+            self.assertEqual(configured.default_model, 'claude-opus-5-5')
+            self.assertEqual(configured.provider, 'anthropic')
+            self.assertEqual(configured.public_health(True)['providers'], ['agy-cli', 'anthropic'])
+
+            for bad_socket in ('relative.sock', '/tmp/bad\npath.sock', '/' + 'a' * 120):
+                with self.subTest(bad_socket=bad_socket), self.assertRaises(ConfigError):
+                    RuntimeConfig(state_dir=Path(directory), service_token=TOKEN,
+                                  agy_socket=bad_socket)
+
 
 class BaseRuntimeTest(unittest.TestCase):
     def setUp(self):
@@ -346,30 +375,48 @@ class DurableJobTests(BaseRuntimeTest):
 
     def test_restart_recovery_marks_interrupted_without_replay(self):
         store = Store(self.state_dir)
-        for number, state in ((1, 'queued'), (2, 'running'), (3, 'cancelling')):
+        for number, state in enumerate(('queued', 'running', 'cancelling') * 2, start=1):
             job_id = 'job-recover-%04d' % number
             store.create_job(
                 owner_id=OWNER,
                 job_id=job_id,
                 idempotency_key='idem-recover-%04d' % number,
                 request_hash='hash-recover-%04d' % number,
-                role='red', model=MODEL, effort='high', provider='anthropic',
+                role='blue', model=MODEL if number <= 3 else 'gemini-4-neon-high',
+                effort='high', provider='anthropic' if number <= 3 else 'agy-cli',
                 progress={'completedCalls': 0, 'requiredCalls': 12, 'phase': 'queued'})
             if state != 'queued':
                 store.transition(OWNER, job_id, ('queued',), state)
         runner = FakeRunner()
         service = RuntimeService(self.config(), store=store, review_runner=runner)
         self.addCleanup(service.close)
-        self.assertEqual(service.recovered, 3)
-        for number in (1, 2, 3):
+        self.assertEqual(service.recovered, 6)
+        for number in range(1, 7):
             job = service.get_job(OWNER, 'job-recover-%04d' % number)
             self.assertEqual(job['state'], 'interrupted')
             self.assertEqual(job['failure']['code'], 'runtime_restarted')
-            self.assertFalse(job['failure']['retryable'])
+            self.assertEqual(job['failure']['retryable'], number in (4, 5))
         self.assertEqual(runner.calls, [])
         self.assertEqual(service.submit_job(self.body(
             self.upload(service), job_id='job-after-restart', key='idem-after-01'))[1],
             False)
+
+    def test_reopening_store_preserves_existing_artifact_and_accepts_gemini_jobs(self):
+        original = Store(self.state_dir)
+        def create(store, key, model, provider):
+            return store.create_job(
+                owner_id=OWNER, job_id=key, idempotency_key=key, request_hash=key,
+                role='blue', model=model, effort='high', provider=provider,
+                progress={'completedCalls': 0, 'requiredCalls': 1, 'phase': 'queued'},
+            )[0]
+        existing = create(original, 'old-review', MODEL, 'anthropic')
+        data = b'{"findings":[]}'
+        artifact = original.add_artifact(OWNER, existing['id'], 'review.json', 'application/json', data)
+        reopened = Store(self.state_dir)
+        new = create(reopened, 'local-review', 'gemini-4-neon-high', 'agy-cli')
+        self.assertEqual(new['provider'], 'agy-cli')
+        self.assertEqual(reopened.get_job(OWNER, existing['id'])['provider'], 'anthropic')
+        self.assertEqual(reopened.get_artifact(OWNER, existing['id'], artifact['id'])[1], data)
 
     def test_owner_isolation_for_upload_job_cancel_and_artifact(self):
         runner = FakeRunner()
@@ -866,6 +913,64 @@ class HttpTests(BaseRuntimeTest):
 
 
 class ProviderRoutingTests(BaseRuntimeTest):
+    def test_local_gemini_blue_uses_cli_without_provider_keys(self):
+        model = 'gemini-4-neon-high'
+        reply = {'status': 'ok', 'response': {'status': 'ok', 'findings': []},
+                 'provider_model': model, 'usage': {'input_tokens': 11, 'output_tokens': 4}}
+        with patch.dict(os.environ, {'HOSTED_AI_MODELS': model}, clear=True), \
+                patch('agy_backend.AgyBackend') as adapter:
+            adapter.return_value.infer.return_value = reply
+            service = RuntimeService(self.config(models=(model,), default_model=model))
+            self.addCleanup(service.close)
+            upload = self.upload(service)
+            body = self.body(upload, role='blue', model=model, useEvidence=False)
+            for changes in ({'role': 'red'}, {'effort': 'low'}):
+                with self.assertRaises(ServiceError):
+                    service.submit_job({**body, **changes})
+            snapshot, _ = service.submit_job(body)
+            done = wait_state(service, OWNER, snapshot['id'])
+            self.assertEqual(done['state'], 'completed', done)
+            self.assertEqual(done['provider'], 'agy-cli')
+            self.assertEqual(done['result']['provider']['models'], [model])
+            self.assertEqual(done['result']['provider']['id'], 'agy-cli')
+            self.assertEqual(done['result']['hostedSelection'],
+                             {'provider': 'agy-cli', 'model': model, 'effort': 'high'})
+            adapter.return_value.infer.assert_called_once()
+
+    def test_mixed_allowlist_preserves_red_defaults_and_explicit_other_models(self):
+        runner = FakeRunner()
+        service = RuntimeService(self.config(
+            models=('claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-5', 'gemini-4-neon-high'),
+            default_model='claude-opus-5-5', blue_default_model='gemini-4-neon-high',
+        ), review_runner=runner)
+        self.addCleanup(service.close)
+        upload = self.upload(service)
+
+        # Omitted model on RED preserves default claude-opus-5-5 / anthropic.
+        red_body = self.body(upload, role='red', job_id='job-red-default',
+                             key='idem-red-default', request_hash='hash-red-default')
+        red_body.pop('model')
+        red_snap, _ = service.submit_job(red_body)
+        red_done = wait_state(service, OWNER, red_snap['id'])
+        self.assertEqual((red_done['state'], red_done['model'], red_done['provider']),
+                         ('completed', 'claude-opus-5-5', 'anthropic'))
+
+        blue_body = self.body(upload, role='blue', job_id='job-blue-default',
+                              key='idem-blue-default', request_hash='hash-blue-default')
+        blue_body.pop('model')
+        blue_snap, _ = service.submit_job(blue_body)
+        blue_done = wait_state(service, OWNER, blue_snap['id'])
+        self.assertEqual((blue_done['state'], blue_done['model'], blue_done['provider']),
+                         ('completed', 'gemini-4-neon-high', 'agy-cli'))
+
+        # Explicitly selected other model on BLUE (e.g. gpt-5) still routes to openai.
+        blue_openai, _ = service.submit_job(self.body(
+            upload, role='blue', model='gpt-5', effort='medium',
+            job_id='job-blue-openai', key='idem-blue-openai', request_hash='hash-blue-openai'))
+        blue_done = wait_state(service, OWNER, blue_openai['id'])
+        self.assertEqual((blue_done['state'], blue_done['model'], blue_done['provider']),
+                         ('completed', 'gpt-5', 'openai'))
+
     def test_claude_job_keeps_anthropic_when_allowlist_starts_with_openai(self):
         runner = FakeRunner()
         service = RuntimeService(self.config(

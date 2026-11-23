@@ -6,9 +6,11 @@ import { scrypt, timingSafeEqual } from 'node:crypto';
 import H from '../../../app/dist/harness-core.js';
 import { validatePayload, publicPayload, payloadHash } from '../../../app/dist/cloud-records-core.mjs';
 import { handleConfluence, matchConfluence, confluenceOnly, LEGACY_WRITES, budgetedFetch } from './confluence.mjs';
+import { handleW8PaperLinks, isPublicPaperLinkRead, matchW8PaperLinks } from './w8-paper-links.mjs';
+import { handleW8, matchW8 } from './w8-team.mjs';
 import { hostingEnabled } from './ai-identity.mjs';
 import { aiFetch } from './ai-runtime-client.mjs';
-import { handleAiRequest, matchAi } from './ai-gateway.mjs';
+import { handleAiRequest, isAiPreviewOriginAllowed, matchAi } from './ai-gateway.mjs';
 import { boothEnabled, handleBoothRequest, matchBooth } from './booth.mjs';
 import { createRecipe, handleBoothRecipeRequest, matchBoothRecipes, missionText, missionsList } from './booth-recipes.mjs';
 import { handleAgentMcp } from './agent-mcp.mjs';
@@ -722,9 +724,9 @@ async function dispatchApiRequest(request, env, url, matched, config) {
   return methods[request.method]({ request, env, url, id: matched.id, settings: config });
 }
 
-// Booth, paper search, AI, Confluence and legacy records routes stay distinct; none of them fall through.
+// Booth, paper search, AI, W8 paper links, W8 team, Confluence and legacy records routes stay distinct; none of them fall through.
 function matchRequest(pathname) {
-  const none = { recipes: null, mcp: null, booth: null, papers: null, ai: null, confluence: null, matched: null };
+  const none = { recipes: null, mcp: null, booth: null, papers: null, ai: null, paperLinks: null, w8: null, confluence: null, matched: null };
   const recipes = matchBoothRecipes(pathname);
   if (recipes) return { ...none, recipes };
   if (pathname === '/mcp') return { ...none, mcp: { template: '/mcp' } };
@@ -734,20 +736,25 @@ function matchRequest(pathname) {
   if (papers) return { ...none, papers };
   const ai = matchAi(pathname);
   if (ai) return { ...none, ai };
+  const paperLinks = matchW8PaperLinks(pathname);
+  if (paperLinks) return { ...none, paperLinks };
+  const w8 = matchW8(pathname);
+  if (w8) return { ...none, w8 };
   const confluence = matchConfluence(pathname);
   if (confluence) return { ...none, confluence };
   return { ...none, matched: route(pathname) };
 }
 
-function logRouteFor({ recipes, mcp, booth, papers, ai, confluence, matched }) {
-  return recipes?.template ?? mcp?.template ?? booth?.template ?? papers?.template ?? ai?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
+function logRouteFor({ recipes, mcp, booth, papers, ai, paperLinks, w8, confluence, matched }) {
+  return recipes?.template ?? mcp?.template ?? booth?.template ?? papers?.template ?? ai?.template ?? paperLinks?.template ?? w8?.template ?? confluence?.template ?? matched?.template ?? 'unmatched';
 }
 
 // The OAuth callback is a top-level navigation from Atlassian, not a frontend XHR.
-// Recipe and mission-text routes are public CORS "*" routes without credentials.
-function originGateOpen(matched, origin, allowed) {
+// Recipe, mission-text and public W8 paper-link reads are public CORS "*" routes without credentials.
+function originGateOpen(matched, origin, allowed, request) {
   if (matched.recipes || matched.mcp) return true;
   if (matched.confluence?.template === '/v1/confluence/auth/callback') return true;
+  if (matched.paperLinks && isPublicPaperLinkRead(matched.paperLinks, request, allowed)) return true;
   return origin === null || allowed;
 }
 
@@ -778,18 +785,19 @@ function dispatchMcp(request, env) {
   return handleAgentMcp(request, env, { createRecipe, missionsList, missionText: paperId => missionText(paperId, env) });
 }
 
-// Recipe routes already carry Access-Control-Allow-Origin "*". /mcp answers "*" on every response,
-// including the Worker's own 404 and 405. Everything else echoes an allowed Origin only.
-function finishCors(response, matched, origin, allowed) {
+// Recipe routes already carry Access-Control-Allow-Origin "*". /mcp and anonymous W8 paper-link reads
+// answer "*" without credentials. Everything else (including W8 paper-link writes) echoes an allowed Origin only.
+function finishCors(response, matched, origin, allowed, request) {
   if (matched.recipes) return response;
-  if (!matched.mcp) return withCors(response, origin, allowed);
+  const publicCors = Boolean(matched.mcp) || Boolean(matched.paperLinks && isPublicPaperLinkRead(matched.paperLinks, request, allowed));
+  if (!publicCors) return withCors(response, origin, allowed);
   const headers = new Headers(response.headers);
   headers.set('Access-Control-Allow-Origin', '*');
   headers.delete('Access-Control-Allow-Credentials');
   return new Response(response.body, { status: response.status, headers });
 }
 
-async function dispatchRequest(request, env, url, matched, config) {
+async function dispatchRequest(request, env, url, matched, config, allowed) {
   if (matched.recipes) {
     return handleBoothRecipeRequest({ request, env, url, match: matched.recipes, clientIp: clientIp(request) });
   }
@@ -828,6 +836,20 @@ async function dispatchRequest(request, env, url, matched, config) {
       deps: aiDependencies(request, env),
     });
   }
+  if (matched.paperLinks) {
+    return handleW8PaperLinks({
+      request,
+      env,
+      url,
+      match: matched.paperLinks,
+      allowedOrigin: allowed,
+      authFetchImpl: budgetedFetch(aiFetch(env), 15000),
+      deps: aiDependencies(request, env),
+    });
+  }
+  if (matched.w8) {
+    return handleW8({ request, env, url, match: matched.w8, settings: config });
+  }
   if (matched.confluence) {
     return handleConfluence({ request, env, url, match: matched.confluence, settings: config });
   }
@@ -849,16 +871,17 @@ export default {
     const config = settings(env);
     const allowed = origin !== null && config.origins.has(origin);
     const matched = matchRequest(url.pathname);
+    const corsAllowed = allowed || isAiPreviewOriginAllowed(env, origin, request, matched.ai);
     const logRoute = logRouteFor(matched);
     let response;
     try {
-      if (!originGateOpen(matched, origin, allowed)) throw fail(403, 'origin_not_allowed');
-      response = await dispatchRequest(request, env, url, matched, config);
+      if (!originGateOpen(matched, origin, corsAllowed, request)) throw fail(403, 'origin_not_allowed');
+      response = await dispatchRequest(request, env, url, matched, config, allowed);
     } catch (error) {
       response = errorResponse(normalizeError(error, logRoute));
     }
     // Logs carry the route template, method, status and timing only: no URL, ids, query, body, token or IP.
     console.log(JSON.stringify({ event: 'request', method: request.method, route: logRoute, status: response.status, ms: Date.now() - started }));
-    return finishCors(response, matched, origin, allowed);
+    return finishCors(response, matched, origin, corsAllowed, request);
   },
 };

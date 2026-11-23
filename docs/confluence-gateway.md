@@ -81,7 +81,7 @@ openssl rand -base64 32
 
 ## 공식 스코프
 
-인가 URL의 `scope`는 아래 9개만, 이 순서로, 한 칸으로 이어 보낸다. 2026-10-23 갱신된 [Confluence OAuth 2.0 (3LO) 스코프](https://developer.atlassian.com/cloud/confluence/scopes-for-oauth-2-3LO-and-forge-apps/)는 연산 페이지에 classic 스코프가 있으면 그것을 쓰고, granular 스코프는 classic을 쓸 수 없을 때만 쓰라고 한다. 연산별 값은 [스코프 결정 방법](https://developer.atlassian.com/cloud/oauth/getting-started/determining-scopes/)대로 각 REST 연산과 [Confluence Cloud REST API v2 OpenAPI](https://dac-static.atlassian.com/cloud/confluence/openapi-v2.v3.json)의 `x-atlassian-oauth2-scopes`에서 확인했다. `offline_access`는 [3LO 문서](https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/)에서 리프레시 토큰을 받기 위한 스코프다. `GET https://api.atlassian.com/oauth/token/accessible-resources`에는 별도의 Confluence 제품 스코프가 없다.
+기본 아카이브 연결(`/v1/confluence/auth/start`)은 아래 9개 스코프를 순서대로 요청한다. 2026-10-23 갱신된 [Confluence OAuth 2.0 (3LO) 스코프](https://developer.atlassian.com/cloud/confluence/scopes-for-oauth-2-3LO-and-forge-apps/)는 연산 페이지에 classic 스코프가 있으면 그것을 쓰고, granular 스코프는 classic을 쓸 수 없을 때만 쓰라고 한다. 연산별 값은 [스코프 결정 방법](https://developer.atlassian.com/cloud/oauth/getting-started/determining-scopes/)대로 각 REST 연산과 [Confluence Cloud REST API v2 OpenAPI](https://dac-static.atlassian.com/cloud/confluence/openapi-v2.v3.json)의 `x-atlassian-oauth2-scopes`에서 확인했다. `offline_access`는 [3LO 문서](https://developer.atlassian.com/cloud/confluence/oauth-2-3lo-apps/)에서 리프레시 토큰을 받기 위한 스코프다. `GET https://api.atlassian.com/oauth/token/accessible-resources`에는 별도의 Confluence 제품 스코프가 없다.
 
 | 호출 | 공식 스코프 | 근거 |
 | --- | --- | --- |
@@ -96,6 +96,10 @@ openssl rand -base64 32
 | `GET /wiki/rest/api/content/{id}/child/attachment/{attachmentId}/download` | classic `readonly:content.attachment:confluence` | 같은 페이지의 Get URI to download attachment. 응답은 리다이렉트다 |
 | `POST /wiki/rest/api/content/{id}/label` | classic `write:confluence-content` | [Add labels to content](https://developer.atlassian.com/cloud/confluence/rest/v1/api-group-content-labels/) |
 
+논문 자동 동기화(`/v1/w8/paper-auth/start`)는 기본 9개에 classic `read:confluence-user`를 추가한다. `GET /wiki/rest/api/user/current`에서 현재 계정 ID를 확인해 같은 논문에 참여한 팀원들의 수정본과 BLUE 검수 기록을 구분한다. [Atlassian 현재 사용자 조회 명세](https://developer.atlassian.com/cloud/confluence/rest/v1/api-group-users/#api-wiki-rest-api-user-current-get)
+
+팀 기록의 **Jira 읽기 권한 연결**은 `/v1/w8/history/auth/start`를 사용한다. 앱 소유자는 개발자 콘솔의 Jira API에서 classic `read:jira-work`를 등록한다. 기존 Confluence 세션은 Confluence 기록을 바로 읽을 수 있다. 두 제품을 함께 승인하면 콜백은 Falsify 사이트의 Jira·Confluence 스코프를 한 세션에 보관한다. [Atlassian Jira OAuth 스코프](https://developer.atlassian.com/cloud/jira/platform/scopes-for-oauth-2-3LO-and-forge-apps/)
+
 v2 OpenAPI에는 `POST /pages/{id}/attachments`와 `POST /pages/{id}/labels`가 없다. 그래서 업로드와 라벨은 위 v1 연산을 쓴다. 같은 v1 연산의 granular 대체값은 업로드 `read:content-details:confluence`와 `write:attachment:confluence`, 다운로드 `read:attachment:confluence`, 라벨 `read:label:confluence`와 `write:label:confluence`다. classic이 등록되면 이 대체값은 인가 URL에 넣지 않는다.
 
 자식 목록은 문서에 Deprecated로 표시된 `GET /pages/{id}/children`을 쓰고 스코프는 `read:page:confluence`다. 대체 연산 `GET /pages/{id}/direct-children`의 스코프는 `read:hierarchical-content:confluence`이며 이 게이트웨이는 그 연산을 호출하지 않는다.
@@ -106,7 +110,7 @@ v2 OpenAPI에는 `POST /pages/{id}/attachments`와 `POST /pages/{id}/labels`가 
 
 1. 중앙 3LO 앱은 하나다. 비공개가 아닌 클라이언트 ID `LQL1zmOGHXyk8V4ShnSdPJCc5MzJWYDN`는 `wrangler.jsonc`의 `ATLASSIAN_CLIENT_ID`에 있다.
 2. 운영자가 저장한 프로덕션 콜백 경로는 `/v1/confluence/auth/callback`이다. 쿼리, 해시, 사용자 정보는 없다. 워커 호스트를 포함한 전체 URL은 시크릿 `ATLASSIAN_CALLBACK_URL`에 넣는다. `http`는 `localhost` 또는 `127.0.0.1`에서만 받는다.
-3. 개발자 콘솔의 동의 스코프는 위 표의 9개와 같게 둔다. `read:content.metadata:confluence`는 조상 id를 읽기 위한 것이며 본문 읽기 권한을 넓히지 않는다. 제한 목록을 읽는 classic `read:confluence-content.all`은 요청하지 않는다.
+3. 기본 아카이브와 논문 자동 동기화를 제공하는 앱에는 두 경로에서 요청하는 권한을 등록한다. 논문 연결 중 `read:confluence-user`가 누락됐다는 오류가 뜨면 **Falsify Paper Workbench → Permissions → Confluence API → Configure → Classic scopes**에서 **Read user**를 추가하고 저장한다. 오류 창을 닫고 기존 Workbench 탭에서 **Confluence 연결**을 다시 누르면 열어 둔 논문의 동기화가 이어진다. [Atlassian 개발자 콘솔](https://developer.atlassian.com/apps)
 4. 시크릿은 `ATLASSIAN_CLIENT_SECRET`과 `CONFLUENCE_SESSION_KEY`뿐이다. 세션 키는 32바이트를 base64로 둔다. `openssl rand -base64 32`
 5. 아카이브 부모는 저장소 기본값 `CONFLUENCE_PARENT_PAGE_ID=8355842`다. 운영자는 이 페이지를 Falsify 공간 `65737` 안에서 워크스페이스 페이지 `66042` 아래에 만들었다고 보고했다. 게이트웨이는 `8355842`만 부모로 쓰고 `66042`에는 페이지를 만들지 않는다. 콘솔에 공간 멤버가 편집할 수 있다고 표시된 것은 이 후보가 확인한 라이브 권한이 아니다.
 6. 고정 공개값은 사이트 `https://falsify.atlassian.net`, 공간 키 `Falsify`, 공간 ID `65737`이다. `REMOTE_PROVIDER`는 `confluence`만 쓴다.

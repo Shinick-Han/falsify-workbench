@@ -32,9 +32,11 @@ class ConfigError(ValueError):
 
 
 def provider_for_model(model):
-    """Return ``anthropic`` or ``openai`` for an allowlisted model id, else ``None``."""
+    """Identify the provider for a supported model family."""
     if not isinstance(model, str) or not model:
         return None
+    if model == 'gemini-4-neon-high':
+        return 'agy-cli'
     if model.startswith('claude-'):
         return 'anthropic'
     if model.startswith('gpt-') or (len(model) > 1 and model[0] == 'o' and model[1].isdigit()):
@@ -150,6 +152,24 @@ def _check_bind(bind_host, bind_port):
     return int(bind_port)
 
 
+def _check_agy_socket(value):
+    if value is None or value == '':
+        return None
+    if isinstance(value, Path):
+        raw = str(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+    else:
+        raise ConfigError('HOSTED_AI_AGY_SOCKET must be an absolute Unix socket path')
+    if not raw:
+        return None
+    if any(ord(ch) < 32 for ch in raw) or not Path(raw).is_absolute():
+        raise ConfigError('HOSTED_AI_AGY_SOCKET must be an absolute Unix socket path')
+    if len(raw.encode('utf-8')) > 107:
+        raise ConfigError('HOSTED_AI_AGY_SOCKET path is too long')
+    return raw
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """Validated runtime settings.  ``service_token`` is excluded from repr."""
@@ -173,11 +193,15 @@ class RuntimeConfig:
     paper_max_owners: int = 32
     paper_max_concurrency: int = 2
     paper_max_analysis: int = 1
+    agy_socket: str | None = None
+    blue_default_model: str | None = None
 
     def __post_init__(self):
         state_dir = Path(self.state_dir).expanduser()
         _check_token(self.service_token)
         models = _check_models(self.models, self.default_model)
+        if self.blue_default_model is not None and self.blue_default_model not in models:
+            raise ConfigError('HOSTED_AI_BLUE_DEFAULT_MODEL must be in HOSTED_AI_MODELS')
         efforts = _check_efforts(self.efforts, self.default_effort)
         max_upload, max_concurrency, max_calls, max_prompt, retention = _check_limits(
             self.max_upload_bytes, self.max_concurrency, self.max_calls,
@@ -186,6 +210,7 @@ class RuntimeConfig:
         enabled, owners, paper_concurrency, paper_analysis = _check_paper(
             self.paper_tools, self.paper_max_owners, self.paper_max_concurrency,
             self.paper_max_analysis)
+        agy_socket = _check_agy_socket(self.agy_socket)
         object.__setattr__(self, 'state_dir', state_dir)
         object.__setattr__(self, 'models', models)
         object.__setattr__(self, 'provider', provider_for_model(models[0]))
@@ -200,6 +225,7 @@ class RuntimeConfig:
         object.__setattr__(self, 'paper_max_owners', owners)
         object.__setattr__(self, 'paper_max_concurrency', paper_concurrency)
         object.__setattr__(self, 'paper_max_analysis', paper_analysis)
+        object.__setattr__(self, 'agy_socket', agy_socket)
 
     @classmethod
     def from_env(cls, env=None):
@@ -233,6 +259,8 @@ class RuntimeConfig:
             paper_max_owners=_env_int(values, 'HOSTED_PAPER_MAX_OWNERS', 32, 1, 1024),
             paper_max_concurrency=_env_int(values, 'HOSTED_PAPER_MAX_CONCURRENCY', 2, 1, 32),
             paper_max_analysis=_env_int(values, 'HOSTED_PAPER_MAX_ANALYSIS', 1, 1, 32),
+            agy_socket=values.get('HOSTED_AI_AGY_SOCKET') or None,
+            blue_default_model=values.get('HOSTED_AI_BLUE_DEFAULT_MODEL') or None,
         )
 
     def public_health(self, ready):

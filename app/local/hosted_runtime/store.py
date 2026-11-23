@@ -56,6 +56,11 @@ class JobIdConflict(StoreError):
         super().__init__('job_id_conflict')
 
 
+class RuntimeBusy(StoreError):
+    def __init__(self):
+        super().__init__('runtime_busy')
+
+
 class Store:
     """Durable state for one state directory; RuntimeService enforces a single writer."""
 
@@ -331,7 +336,7 @@ class Store:
 
     def create_job(self, *, owner_id, job_id, idempotency_key, request_hash, role,
                    model, effort, provider, progress, apply_only=False, use_evidence=True,
-                   upload_id=None):
+                   upload_id=None, max_active_jobs=None):
         """Insert a queued job or return the existing idempotent job."""
         now = utc_now()
         with self._write() as conn:
@@ -343,6 +348,12 @@ class Store:
                 return self._job(row), False
             if conn.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone() is not None:
                 raise JobIdConflict()
+            if max_active_jobs is not None:
+                active = conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE state IN ('queued', 'running')"
+                ).fetchone()[0]
+                if active >= max_active_jobs:
+                    raise RuntimeBusy()
             try:
                 conn.execute(
                     'INSERT INTO jobs(id, owner_id, idempotency_key, request_hash, role, state, '
@@ -433,13 +444,14 @@ class Store:
     def mark_recovered(self, failure):
         """Mark queued/running/cancelling jobs interrupted; never schedules a replay."""
         now = utc_now()
-        payload = _dump(failure)
+        # Mark interrupted local inference as retryable for the owning client.
         with self._write() as conn:
             cursor = conn.execute(
-                "UPDATE jobs SET state='interrupted', failure=?, updated_at=?, "
-                "completed_at=COALESCE(completed_at, ?) "
+                "UPDATE jobs SET state='interrupted', failure=CASE "
+                "WHEN provider='agy-cli' AND state IN ('queued', 'running') THEN ? ELSE ? END, "
+                "updated_at=?, completed_at=COALESCE(completed_at, ?) "
                 "WHERE state IN ('queued', 'running', 'cancelling')",
-                (payload, now, now))
+                (_dump({**failure, 'retryable': True}), _dump(failure), now, now))
             return cursor.rowcount
 
     # ------------------------------------------------------------------ artifacts

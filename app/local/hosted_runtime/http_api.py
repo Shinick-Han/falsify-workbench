@@ -227,13 +227,18 @@ class _Handler(BaseHTTPRequestHandler):
         upload, created = self.server.service.create_upload(owner, names[0], mimes[0], raw)
         self._reply(201 if created else 200, {'upload': upload})
 
+    def _require_slot(self):
+        values = self.headers.get_all('X-Falsify-Require-Slot') or []
+        return len(values) == 1 and values[0].strip() == '1'
+
     def _submit(self, owner):
         content_type = (self.headers.get('Content-Type') or '').split(';', 1)[0].strip().lower()
         if content_type != 'application/json':
             raise ServiceError('invalid_request', 400)
         raw = self._read_body(JSON_LIMIT)
         body = _json_body(raw)
-        snapshot, replayed = self.server.service.submit_job(body, owner)
+        snapshot, replayed = self.server.service.submit_job(
+            body, owner, require_slot=self._require_slot())
         self._reply(200 if replayed else 202, snapshot)
 
     # ------------------------------------------------------------ other methods
@@ -288,6 +293,8 @@ def main(argv=None):
     parser.add_argument('--bind', default=None, help='bind host (default HOSTED_AI_BIND)')
     parser.add_argument('--port', type=int, default=None, help='bind port (default HOSTED_AI_PORT)')
     parser.add_argument('--state-dir', default=None, help='state directory override')
+    parser.add_argument('--agy-socket', default=None,
+                        help='optional local AGY broker Unix socket path (default HOSTED_AI_AGY_SOCKET)')
     args = parser.parse_args(argv)
     try:
         config = RuntimeConfig.from_env()
@@ -301,6 +308,8 @@ def main(argv=None):
         changes['bind_port'] = args.port
     if args.state_dir is not None:
         changes['state_dir'] = args.state_dir
+    if args.agy_socket is not None:
+        changes['agy_socket'] = args.agy_socket
     if changes:
         config = dataclasses.replace(config, **changes)
     print('hosted runtime listening on %s:%d' % (config.bind_host, config.bind_port))

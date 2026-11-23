@@ -43,9 +43,11 @@ nothing is baked into the image):
 | `OPENAI_BASE_URL` | no | HTTPS provider endpoint override (`http://127.0.0.1` allowed for tests). |
 | `HOSTED_AI_MODELS` | no | Comma-separated model allowlist. |
 | `HOSTED_AI_DEFAULT_MODEL` | no | Default model (must be in the allowlist). |
+| `HOSTED_AI_BLUE_DEFAULT_MODEL` | no | Default for BLUE when a client omits its model. Production uses `gemini-4-neon-high` at high effort. |
+| `HOSTED_AI_AGY_SOCKET` | no | Unix socket for local Gemini inference under the operator’s agy login. Production uses `/run/falsify-agy/blue.sock`. |
 | `HOSTED_AI_DEFAULT_EFFORT` | no | Default effort (must be in the effort allowlist). |
 | `HOSTED_AI_MAX_UPLOAD_BYTES` | no | Per-upload limit (default 32 MiB). |
-| `HOSTED_AI_MAX_CONCURRENCY` | no | Worker threads (default 2). |
+| `HOSTED_AI_MAX_CONCURRENCY` | no | Worker threads (default 2). Production Workbench runs 15, matching the local agy broker. |
 | `HOSTED_AI_MAX_CALLS` | no | Default/hard job call budget. |
 | `HOSTED_AI_JOB_RETENTION_SECONDS` | no | Job/blob retention (default 7 days). |
 
@@ -123,6 +125,31 @@ the native PDF workers need writable+executable mappings and extra syscalls.
 
 To upgrade, re-run the installer and `sudo systemctl restart falsify-runtime`; the state directory is
 not touched.
+
+## Workbench W8 single-SHA release layout
+
+All live W8 components deploy from one clean git commit SHA (`<sha>`) staged into a versioned release directory (`/opt/falsify/releases/<release-id>`):
+
+1. **Stage the release tree** from `<sha>` using `git archive` (no worktree state, no `.env`, no secrets):
+   ```bash
+   sudo install -d -m 0755 "/opt/falsify/releases/<release-id>"
+   git archive "<sha>" | sudo tar -x -C "/opt/falsify/releases/<release-id>"
+   sudo chown -R root:root "/opt/falsify/releases/<release-id>"
+   sudo chmod -R go-w "/opt/falsify/releases/<release-id>"
+   ```
+2. **Host services** pointing at `/opt/falsify/releases/<release-id>`:
+   - `falsify-agy-broker.service`: template in `cloud/runtime/systemd/falsify-agy-broker.service`. Runs `/opt/falsify/venv/bin/python -m agy_broker --socket /run/falsify-agy/blue.sock --socket-group falsify-production --socket-mode 0660 --max-concurrency 15` with `WorkingDirectory=/opt/falsify/releases/<release-id>/app/local`.
+   - `falsify-production.service`: drop-in `/etc/systemd/system/falsify-production.service.d/15-gemini-runtime.conf` orders after `falsify-agy-broker.service`, sets `WorkingDirectory=/opt/falsify/releases/<release-id>/app/local`, and loads `/etc/falsify/workbench-blue-gemini.env`.
+   - `falsify-w8-pdf-store.service` (user unit): template in `cloud/runtime/systemd/falsify-w8-pdf-store.service`. Sets `WorkingDirectory=/opt/falsify/releases/<release-id>` and runs `/usr/bin/python3 tools/w8/pdf_store.py` behind Caddy `/w8-archive/*` (`127.0.0.1:18241`).
+3. **Cloudflare Workers and D1** from the same `<sha>` inside `cloud/api`:
+   - D1 migration `0010_w8_paper_titles.sql` on `falsify-harness-records-staging` (`--env staging`) and `falsify-w8-papers` (`--config wrangler.w8-papers.jsonc`) when not yet applied.
+   - `falsify-cloud-api` (`wrangler.jsonc`): production hosted AI Worker (Gemini 4 Neon high default for BLUE, 15 active jobs per owner).
+   - `falsify-cloud-api-staging` (`wrangler.jsonc --env staging`): Confluence/Jira team Worker.
+   - `falsify-w8-papers` (`wrangler.w8-papers.jsonc`): public paper search, PDF proxy, and private PDF link Worker.
+4. **GitHub Pages**: push `<sha>` to `main` so `.github/workflows/pages.yml` builds and publishes `app/dist`.
+
+Operator-local values stay outside git: `/etc/falsify/*.env`, `~/.local/state/falsify/w8-drive-archive/store.env` (including `W8_PDF_STORE_TOKEN` and `RCLONE_CONFIG_DRIVE_ROOT_FOLDER_ID`), host account names in `falsify-agy-broker.service`, and Wrangler secrets.
+
 
 
 

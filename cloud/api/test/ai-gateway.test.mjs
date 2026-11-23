@@ -2720,3 +2720,233 @@ test('paper runtime errors pass through allowlisted codes and drop malformed bod
     assert.equal(down.text.includes('socket'), false);
   });
 });
+
+test('exact gemini-4-neon-high maps to agy-cli, defaults BLUE via AI_BLUE_DEFAULT_MODEL, fixes high effort and stays BLUE-only', async () => {
+  assert.equal(providerForModel('gemini-4-neon-high'), 'agy-cli');
+  assert.equal(providerForModel('gemini-4-neon'), null);
+  assert.equal(providerForModel('gemini-4-neon-high-extra'), null);
+
+  const ordered = aiSettings({
+    AI_MODELS: 'gemini-4-neon-high,claude-opus-5-5,gpt-6.2-astra',
+    AI_DEFAULT_MODEL: 'gemini-4-neon-high',
+    AI_BLUE_DEFAULT_MODEL: 'gemini-4-neon-high',
+    AI_DEFAULT_EFFORT: 'low',
+  });
+  assert.equal(ordered.defaultModel, 'claude-opus-5-5', 'RED default skips BLUE-only Gemini');
+  assert.equal(ordered.blueDefaultModel, 'gemini-4-neon-high');
+  assert.equal(ordered.blueDefaultEffort, 'high', 'Gemini BLUE default effort is fixed to high');
+  assert.equal(ordered.uploadsPerOwnerHour, 60);
+  assert.equal(ordered.jobsPerOwnerHour, 20);
+  assert.equal(ordered.activeJobsPerOwner, 3);
+
+  const wranglerRaw = readFileSync(path.join(apiRoot, 'wrangler.jsonc'), 'utf8');
+  const wranglerJson = JSON.parse(wranglerRaw.split('\n').filter(line => !/^\s*\/\//.test(line)).join('\n'));
+  assert.ok(wranglerJson.vars.AI_MODELS.split(',').includes('gemini-4-neon-high'));
+  assert.equal(wranglerJson.vars.AI_BLUE_DEFAULT_MODEL, 'gemini-4-neon-high');
+  assert.equal(wranglerJson.env.staging.vars.AI_BLUE_DEFAULT_MODEL, undefined);
+  assert.equal(wranglerJson.env.event.vars.AI_BLUE_DEFAULT_MODEL, undefined);
+  assert.equal(String(wranglerJson.env.event.vars.AI_MODELS || '').includes('gemini-4-neon-high'), false);
+  assert.equal(wranglerJson.vars.AI_PREVIEW_ORIGIN, undefined);
+  assert.equal(wranglerJson.vars.AI_ACTIVE_JOBS_PER_OWNER, '15');
+  assert.doesNotMatch(wranglerRaw, /trycloudflare\.com/i);
+
+  const prodModels = 'claude-opus-5-5,claude-sonnet-5-5,gpt-6.2-astra,gemini-4-neon-high';
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_MODELS: prodModels,
+    AI_BLUE_DEFAULT_MODEL: 'gemini-4-neon-high',
+    AI_DEFAULT_EFFORT: 'medium',
+    AI_STUB_PROVIDER: 'omit',
+  }, async (mf, call) => {
+    const caps = await call('GET', '/v1/ai/capabilities');
+    assert.equal(caps.status, 200);
+    assert.equal(caps.body.provider, 'mixed');
+    assert.deepEqual(caps.body.models, prodModels.split(','));
+    assert.equal(caps.body.modelProviders['gemini-4-neon-high'], 'agy-cli');
+    assert.equal(caps.body.modelProviders['claude-opus-5-5'], 'anthropic');
+    assert.equal(caps.body.modelProviders['gpt-6.2-astra'], 'openai');
+    assert.equal(caps.body.blueDefaultModel, 'gemini-4-neon-high');
+    assert.equal(caps.body.blueDefaultEffort, 'high');
+
+    const ada = await register(mf, call, 'geminiblue');
+    const up = await upload(call, ada.body.token, pdfBytes('gemini-blue'));
+    const upId = up.body.upload.id;
+
+    // Omitted model on BLUE uses AI_BLUE_DEFAULT_MODEL with high effort fixed.
+    const blueDefault = await postJob(call, ada.body.token, {
+      role: 'blue', prompt: 'Blind review.', uploadId: upId, idempotencyKey: 'op-blue-default-1',
+    });
+    assert.equal(blueDefault.status, 202);
+    assert.equal(blueDefault.body.job.model, 'gemini-4-neon-high');
+    assert.equal(blueDefault.body.job.effort, 'high');
+    assert.equal(blueDefault.body.job.provider, 'agy-cli');
+
+    // Non-high effort for Gemini is pinned to high; invalid effort token is still 400.
+    const bluePinned = await postJob(call, ada.body.token, {
+      role: 'blue', prompt: 'Blind review pinned.', uploadId: upId, idempotencyKey: 'op-blue-pinned-1',
+      model: 'gemini-4-neon-high', effort: 'low',
+    });
+    assert.equal(bluePinned.status, 202);
+    assert.equal(bluePinned.body.job.model, 'gemini-4-neon-high');
+    assert.equal(bluePinned.body.job.effort, 'high');
+    assert.equal(bluePinned.body.job.provider, 'agy-cli');
+
+    const badEffort = await postJob(call, ada.body.token, {
+      role: 'blue', prompt: 'Bad effort.', uploadId: upId, idempotencyKey: 'op-blue-badeffort',
+      model: 'gemini-4-neon-high', effort: 'ultra',
+    });
+    assert.equal(badEffort.status, 400);
+    assert.equal(badEffort.body.error.code, 'invalid_request');
+
+    // Explicit Claude and GPT models remain available on BLUE with their requested effort.
+    const blueClaude = await postJob(call, ada.body.token, {
+      role: 'blue', prompt: 'Claude BLUE.', uploadId: upId, idempotencyKey: 'op-blue-claude-1',
+      model: 'claude-sonnet-5-5', effort: 'medium',
+    });
+    assert.equal(blueClaude.status, 202);
+    assert.equal(blueClaude.body.job.model, 'claude-sonnet-5-5');
+    assert.equal(blueClaude.body.job.effort, 'medium');
+    assert.equal(blueClaude.body.job.provider, 'anthropic');
+
+    // Mark active jobs terminal in stub so active cap stays free for remaining checks.
+    const d1 = await mf.getD1Database('DB');
+    await d1.prepare("UPDATE ai_stub_jobs SET state = 'completed'").run();
+
+    const blueGpt = await postJob(call, ada.body.token, {
+      role: 'blue', prompt: 'GPT BLUE.', uploadId: upId, idempotencyKey: 'op-blue-gpt-1',
+      model: 'gpt-6.2-astra', effort: 'low',
+    });
+    assert.equal(blueGpt.status, 202);
+    assert.equal(blueGpt.body.job.model, 'gpt-6.2-astra');
+    assert.equal(blueGpt.body.job.effort, 'low');
+    assert.equal(blueGpt.body.job.provider, 'openai');
+
+    // RED rejects gemini-4-neon-high (review, applyOnly and harness adapter), preserves RED default and apply-only.
+    const redGemini = await postJob(call, ada.body.token, {
+      role: 'red', prompt: 'RED Gemini.', uploadId: upId, idempotencyKey: 'op-red-gemini-1',
+      model: 'gemini-4-neon-high',
+    });
+    assert.equal(redGemini.status, 400);
+    assert.equal(redGemini.body.error.code, 'invalid_request');
+
+    const redHarnessGemini = await postJob(call, ada.body.token, {
+      role: 'red', prompt: 'RED harness Gemini.', uploadId: upId, idempotencyKey: 'op-red-hgem-1',
+      harness: { role: 'red', adapter: { type: 'hosted', model: 'gemini-4-neon-high' } },
+    });
+    assert.equal(redHarnessGemini.status, 400);
+
+    const redApplyGemini = await postJob(call, ada.body.token, {
+      role: 'red', prompt: 'Apply edits.', uploadId: upId, idempotencyKey: 'op-red-appgem-1',
+      applyOnly: true, model: 'gemini-4-neon-high',
+      edits: [{ pageIndex: 0, before: '10', after: '11' }],
+    });
+    assert.equal(redApplyGemini.status, 400);
+
+    const redDefault = await postJob(call, ada.body.token, {
+      role: 'red', prompt: 'RED default.', uploadId: upId, idempotencyKey: 'op-red-default-1',
+    });
+    assert.equal(redDefault.status, 202);
+    assert.equal(redDefault.body.job.model, 'claude-opus-5-5');
+    assert.equal(redDefault.body.job.effort, 'medium');
+    assert.equal(redDefault.body.job.provider, 'anthropic');
+
+    const redApply = await postJob(call, ada.body.token, {
+      role: 'red', prompt: 'Apply edits.', uploadId: upId, idempotencyKey: 'op-red-apply-1',
+      applyOnly: true, edits: [{ pageIndex: 0, before: '10', after: '11' }],
+    });
+    assert.equal(redApply.status, 202);
+    assert.equal(redApply.body.job.model, 'claude-opus-5-5');
+    assert.equal(redApply.body.job.applyOnly, true);
+
+    // Lost agy-cli job preserves provider 'agy-cli' when runtime 404s.
+    await d1.prepare('DELETE FROM ai_stub_jobs WHERE id = ?1').bind(blueDefault.body.job.id).run();
+    const lost = await call('GET', `/v1/ai/jobs/${blueDefault.body.job.id}`, { token: ada.body.token });
+    assert.equal(lost.status, 200);
+    assert.equal(lost.body.job.state, 'interrupted');
+    assert.equal(lost.body.job.provider, 'agy-cli');
+  });
+});
+
+test('optional exact WORKBENCH_PREVIEW_ORIGIN / AI_PREVIEW_ORIGIN allows only /v1/ai/* guest CORS', async () => {
+  const PREVIEW = 'https://w8-preview.falsify.pages.dev';
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'true',
+    CONFLUENCE_ONLY: 'false',
+    AI_MODELS: 'claude-opus-5-5,gemini-4-neon-high',
+    AI_BLUE_DEFAULT_MODEL: 'gemini-4-neon-high',
+    WORKBENCH_PREVIEW_ORIGIN: PREVIEW,
+    AI_STUB_PROVIDER: 'omit',
+  }, async (mf, call) => {
+    const preflight = await call('OPTIONS', '/v1/ai/jobs', {
+      headers: { Origin: PREVIEW, 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('Access-Control-Allow-Origin'), PREVIEW);
+
+    const caps = await call('GET', '/v1/ai/capabilities', { headers: { Origin: PREVIEW } });
+    assert.equal(caps.status, 200);
+    assert.equal(caps.headers.get('Access-Control-Allow-Origin'), PREVIEW);
+    assert.equal(caps.body.blueDefaultModel, 'gemini-4-neon-high');
+
+    const minted = await mintGuest(call, undefined, { Origin: PREVIEW });
+    assert.equal(minted.status, 201);
+    assert.equal(minted.headers.get('Access-Control-Allow-Origin'), PREVIEW);
+    const guestToken = minted.body.guest.token;
+
+    const up = await call('POST', '/v1/ai/uploads', {
+      token: guestToken,
+      raw: pdfBytes('preview-guest'),
+      headers: {
+        Origin: PREVIEW,
+        'Content-Type': 'application/pdf',
+        'X-Falsify-File-Name': encodeURIComponent('preview.pdf'),
+      },
+    });
+    assert.equal(up.status, 201);
+    assert.equal(up.headers.get('Access-Control-Allow-Origin'), PREVIEW);
+
+    const job = await call('POST', '/v1/ai/jobs', {
+      token: guestToken,
+      headers: { Origin: PREVIEW },
+      body: { role: 'blue', prompt: 'Preview guest BLUE.', uploadId: up.body.upload.id, idempotencyKey: 'op-preview-guest-1' },
+    });
+    assert.equal(job.status, 202);
+    assert.equal(job.headers.get('Access-Control-Allow-Origin'), PREVIEW);
+    assert.equal(job.body.job.model, 'gemini-4-neon-high');
+    assert.equal(job.body.job.effort, 'high');
+
+    // Member bearer from preview origin is rejected even on /v1/ai/*.
+    const ada = await register(mf, call, 'prevmem');
+    const memberFromPreview = await call('POST', '/v1/ai/jobs', {
+      token: ada.body.token,
+      headers: { Origin: PREVIEW },
+      body: { role: 'blue', prompt: 'No member from preview.', uploadId: up.body.upload.id, idempotencyKey: 'op-preview-mem-1' },
+    });
+    assert.equal(memberFromPreview.status, 403);
+    assert.equal(memberFromPreview.body.error.code, 'origin_not_allowed');
+    assert.equal(memberFromPreview.headers.get('Access-Control-Allow-Origin'), null);
+
+    // Non-/v1/ai/* routes remain blocked for preview origin.
+    const health = await call('GET', '/v1/health', { headers: { Origin: PREVIEW } });
+    assert.equal(health.status, 403);
+    assert.equal(health.body.error.code, 'origin_not_allowed');
+
+    // Non-exact prefix/evil origin is blocked.
+    const evil = await call('GET', '/v1/ai/capabilities', { headers: { Origin: `${PREVIEW}.evil.example` } });
+    assert.equal(evil.status, 403);
+    assert.equal(evil.body.error.code, 'origin_not_allowed');
+  });
+
+  // Preview origin is inactive when AI_OPEN_ACCESS is off.
+  await withApp({
+    AI_HOSTING_ENABLED: 'true',
+    AI_OPEN_ACCESS: 'false',
+    AI_PREVIEW_ORIGIN: PREVIEW,
+  }, async (_mf, call) => {
+    const blocked = await call('GET', '/v1/ai/capabilities', { headers: { Origin: PREVIEW } });
+    assert.equal(blocked.status, 403);
+    assert.equal(blocked.body.error.code, 'origin_not_allowed');
+  });
+});

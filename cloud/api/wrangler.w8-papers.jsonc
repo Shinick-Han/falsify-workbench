@@ -1,0 +1,55 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "falsify-w8-papers",
+  "main": "src/w8-papers-entry.js",
+  "compatibility_date": "2026-10-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "96aee9d5fb56f2efc3d90e147a67f558",
+  "workers_dev": true,
+  "preview_urls": false,
+  // 32 MiB PDF SHA-256 verification and PDF proxying need headroom above the 1000 ms default.
+  "limits": { "cpu_ms": 5000 },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "falsify-w8-papers",
+      "database_id": "f7fbd2ed-f429-4a34-b55a-a6ff5435473c",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // Exact GitHub Pages app origin only; never wildcard for writes.
+    "ALLOWED_ORIGINS": "https://shinick-han.github.io",
+    "CONFLUENCE_ONLY": "true",
+    // Required by ai-gateway.mjs for POST /v1/ai/guest; all other /v1/ai/* routes are blocked by w8-papers-entry.js.
+    "AI_HOSTING_ENABLED": "true",
+    "AI_OPEN_ACCESS": "true",
+    "AI_PAPER_TOOLS_ENABLED": "false",
+    "AI_GUEST_BLUE": "false",
+    "AI_GUEST_MODEL_JOBS": "false",
+    "AI_MODEL_JOBS_OPERATOR_ONLY": "true",
+    "AI_GUEST_SESSION_SECONDS": "21600",
+    "AI_GUESTS_PER_IP_HOUR": "120",
+    "AI_GUESTS_PER_HOUR": "600",
+    "AI_MAX_UPLOAD_BYTES": "33554432",
+    "AI_GUEST_MAX_UPLOAD_BYTES": "20971520",
+    // Public arXiv/OpenAlex paper search and verified PDF proxy.
+    "PAPER_SEARCH_ENABLED": "true",
+    "PAPER_SEARCH_PER_OWNER_HOUR": "120",
+    "PAPER_SEARCH_PER_IP_HOUR": "600",
+    "PAPER_PDF_PER_OWNER_HOUR": "40",
+    "PAPER_PDF_PER_IP_HOUR": "240",
+    "PAPER_SEARCH_PER_HOUR": "3000",
+    // Authenticated private Drive archive store base. W8_PDF_STORE_TOKEN and CONFLUENCE_SESSION_KEY stay Wrangler secrets.
+    "W8_PDF_STORE_BASE": "https://falsify-runtime.shinick.dev/w8-archive",
+    "W8_PDF_LINK_MAX_BYTES": "33554432",
+    "W8_PDF_LINKS_GUEST_PER_OWNER_HOUR": "30",
+    "W8_PDF_LINKS_GUEST_PER_HOUR": "300"
+  },
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
+}
