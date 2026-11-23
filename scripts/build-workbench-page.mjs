@@ -12,9 +12,10 @@ const shell = read('workbench-shell.html')
   .replace('{{TEAM_API}}', teamApi);
 const index = read('../app/dist/index.html');
 const assets = ['booth-edits', 'booth', 'booth-recipe', 'booth-myai', 'booth-pageedit', 'w8-paper', 'w8-paper-links', 'w8-matcher', 'w8-blue', 'w8-csv', 'w8-red-key', 'w8-team', 'w8-paper-sync', 'w8-library', 'w8-history', 'w8-grading', 'w8-workbench'];
-function assetUrl(file) {
-  const version = createHash('sha256').update(read('../app/dist/' + file)).digest('hex').slice(0, 12);
-  return file + '?v=' + version;
+function assetUrl(file, dependencies = []) {
+  const hash = createHash('sha256');
+  for (const name of [file, ...dependencies]) hash.update(read('../app/dist/' + name));
+  return file + '?v=' + hash.digest('hex').slice(0, 12);
 }
 const scripts = assets.map(name => '  <script src="' + assetUrl(name + '.js') + '" defer></script>').join('\n');
 const styles = ['event-theme.css', 'booth.css', 'booth-recipe.css', 'booth-myai.css', 'booth-pageedit.css', 'w8-workbench.css']
@@ -25,6 +26,8 @@ const html = index
   .replace(/^.*(?:src|href)="(?:latex-workbench\.(?:mjs|css)|red-baseline-uri\.(?:js|css))\?[^\n]*\n/gm, '')
   .replace("connect-src 'self'", "connect-src 'self' " + paperApi + ' ' + teamApi)
   .replace(/src="(open-access|external-exchange)\.js\?[^"]+"/g, (_, name) => 'src="' + assetUrl(name + '.js') + '"')
+  .replace(/src="browser-pdf\.js\?[^"]+"/, () =>
+    'src="' + assetUrl('browser-pdf.js', ['browser-pdf-worker.mjs', 'browser-pdf.mjs']) + '"')
   .replace('<html lang="ko">', '<html lang="ko" data-w8-workbench>')
   .replace('</head>', '  <meta name="color-scheme" content="only light">\n' + styles + '\n' + scripts + '\n</head>')
   .replace('<body>', '<body>\n' + shell + '\n<div hidden id="w8-engine-mounts">')
