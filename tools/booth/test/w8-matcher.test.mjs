@@ -223,3 +223,36 @@ test('handles changed-span edits, long rationales, and empty/defensive inputs', 
   assert.deepEqual(matcher.match(spanEdit, null), { verdict: 'missed', links: [], quote: '', rationale: '' });
   assert.deepEqual(matcher.match(spanEdit, []), { verdict: 'missed', links: [], quote: '', rationale: '' });
 });
+
+test('links the changed ordering when the finding explains the two models in that order', () => {
+  const edit = {
+    pageIndex: 4,
+    before: 'slightly higher similarity to bge-base than bge-large',
+    after: 'slightly higher similarity to bge-large than bge-base',
+  };
+  const finding = {
+    id: 'ordering',
+    pageIndex: 4,
+    quote: 'bge-base has a lower embedding dimension',
+    rationale: 'The model is more similar to bge-large than to bge-base and therefore linked to the higher dimension.',
+  };
+  assert.deepEqual(loadBrowserMatcher().match(edit, [finding]).links, ['ordering']);
+  assert.equal(matchEditDetailed(edit, [finding]).match.verdict, 'caught');
+  assert.equal(matchEditDetailed(edit, [{ ...finding, rationale: 'More similar to bge-base than to bge-large.' }]).match.verdict, 'missed');
+});
+
+test('does not connect a revised value mentioned only in evidence for a different group', () => {
+  const edit = { pageIndex: 4, before: 'merely 0.18', after: 'merely 0.28' };
+  const finding = {
+    id: 'maximum',
+    pageIndex: 4,
+    quote: 'The maximum in the larger cohort is 0.57.',
+    rationale: 'The highlighted maximum belongs to a separate cohort.',
+    evidence: [{ pageIndex: 4, quote: 'Results matrix 0.18 0.28 0.57' }],
+  };
+  assert.equal(matchEditDetailed(edit, [finding]).match.verdict, 'missed');
+  assert.deepEqual(loadBrowserMatcher().match(edit, [finding]).links, []);
+  assert.equal(matchEditDetailed({ ...edit, before: '0.18', after: '0.28' }, [{
+    ...finding, evidence: [], quote: 'The other group measured 0.280.',
+  }]).match.verdict, 'missed');
+});

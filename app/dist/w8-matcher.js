@@ -244,22 +244,46 @@
     }));
   }
 
-  // Same page is required: the finding's own page or any page its evidence cites.
-  // Caught is containment, a same-page quote spanning the changed region, or high token overlap.
-  // Partial is weaker overlap, or a number that changed between before and after
-  // appearing in a quote, an evidence quote, or the rationale.
+  const COMPARISON_PAIR = /([\p{L}\p{N}][\p{L}\p{N}.-]*)\s+than\s+(?:to\s+)?([\p{L}\p{N}][\p{L}\p{N}.-]*)/gu;
+
+  function orderedComparisons(text) {
+    return Array.from(fold(text).matchAll(COMPARISON_PAIR), match => [match[1].replace(/\.+$/, ''), match[2].replace(/\.+$/, '')]);
+  }
+
+  function citesReorderedComparison(edit, finding) {
+    const before = orderedComparisons(edit.before || '')[0];
+    const after = orderedComparisons(edit.after || '')[0];
+    if (!before || !after || before[0] === before[1]) return false;
+    if (before[0] !== after[1] || before[1] !== after[0]) return false;
+    const local = pageQuotes(finding, edit.pageIndex).map(fold);
+    if (!local.some(text => after.some(word => findWhole(text, word) >= 0))) return false;
+    return orderedComparisons(finding.rationale || '').some(([left, right]) => left === after[0] && right === after[1]);
+  }
+
+  function citesChangedNumber(edit, finding, local) {
+    const anchors = tokens(edit.after).filter(word => /\p{L}{3}/u.test(word));
+    const claim = [findingPageIndex(finding) === edit.pageIndex ? bestQuote(finding) : '', finding.rationale].join(' ');
+    const context = fold([...local, finding.rationale].join(' '));
+    const describesChange = /\b(?:number|value|score) (?:changed|revised) to\b/i.test(finding.rationale || '');
+    if (anchors.length && !describesChange && !anchors.some(word => findWhole(context, word) >= 0)) return false;
+    return changedNumbers(edit.before, edit.after).some(number => numberAppears(claim, number));
+  }
+
   function judge(edit, finding) {
     const after = typeof edit.after === 'string' ? edit.after : '';
     const foldedAfter = fold(after);
     const texts = quoteTexts(finding);
-    const contained = foldedAfter.length >= 4 && texts.some(text => fold(text).includes(foldedAfter));
+    const local = pageQuotes(finding, edit.pageIndex);
+    const numeric = /^\d+(?:\.\d+)?$/.test(foldedAfter);
+    const contained = foldedAfter.length >= 4 && (numeric
+      ? [...local, ...unpagedEvidenceQuotes(finding, edit.pageIndex)].some(text => numberAppears(text, foldedAfter))
+      : texts.some(text => fold(text).includes(foldedAfter)));
     const region = changedRegion(edit.before || '', after);
-    const spanHit = Boolean(region && pageQuotes(finding, edit.pageIndex).some(text => quoteHitsChange(region, text)));
+    const spanHit = Boolean(region && local.some(text => quoteHitsChange(region, text)));
     const ratio = maxOverlapRatio(texts, after, foldedAfter, region);
-    const numberText = [...texts, finding.rationale].filter(part => typeof part === 'string').join('\n');
-    const numHit = changedNumbers(edit.before || '', after).some(number => numberAppears(numberText, number));
+    const numHit = citesChangedNumber(edit, finding, local);
     let verdict = '';
-    if (contained || spanHit || ratio >= 0.6) verdict = 'caught';
+    if (contained || spanHit || ratio >= 0.6 || citesReorderedComparison(edit, finding)) verdict = 'caught';
     else if (ratio >= 0.3 || numHit) verdict = 'partial';
     return { verdict, ratio, numHit };
   }
