@@ -33,7 +33,9 @@ import re
 import secrets
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
+from itertools import takewhile
 
 import pymupdf
 
@@ -214,6 +216,94 @@ def _union(boxes):
         round(max(b[2] for b in boxes), 3), round(max(b[3] for b in boxes), 3)]
 
 
+_NUMERIC_CELL = re.compile(r'[+−-]?(?:\d+(?:[.,]\d+)?|\.\d+)(?:[eE][+-]?\d+)?%?\Z')
+
+
+def _ruled_regions(page):
+    groups = defaultdict(set)
+    for path in page.get_drawings():
+        rect = path['rect']
+        if rect.width >= 40 and rect.height <= 2 and (path.get('color') or path.get('fill')):
+            groups[(round(rect.x0), round(rect.x1))].add((rect.y0 + rect.y1) / 2)
+    for (left, right), heights in groups.items():
+        if len(heights) == 3:
+            yield left, right, *sorted(heights)
+
+
+def _word_y(word):
+    return (word[1] + word[3]) / 2
+
+
+def _body_rows(words):
+    rows = []
+    for word in sorted(words, key=_word_y):
+        if rows and _word_y(word) - _word_y(rows[-1][0]) < .4 * (word[3] - word[1]):
+            rows[-1].append(word)
+        else:
+            rows.append([word])
+    return [sorted(row, key=lambda word: word[0]) for row in rows]
+
+
+def _split_numeric_row(row):
+    count = sum(1 for _ in takewhile(lambda word: _NUMERIC_CELL.fullmatch(word[4]), reversed(row)))
+    return (row[:-count], row[-count:]) if 1 <= count < len(row) else (row, [])
+
+
+def _column_gaps(groups):
+    edges = [(min(word[0] for word in cell), max(word[2] for word in cell)) for cell in groups]
+    gaps = [(right, left) for (_, right), (left, _) in zip(edges, edges[1:])]
+    return [(a + b) / 2 for a, b in gaps] if all(b - a > 2 for a, b in gaps) else []
+
+
+def _numeric_gutters(rows):
+    split = [_split_numeric_row(row) for row in rows]
+    width = len(split[0][1])
+    if not width or any(len(values) != width for _, values in split):
+        return []
+    numeric = list(zip(*(values for _, values in split)))
+    if any(max(word[0] for word in cells) >= min(word[2] for word in cells) for cells in numeric):
+        return []
+    labels = [word for label, _ in split for word in label]
+    return _column_gaps([labels, *numeric])
+
+
+def _row_gaps(rows):
+    bounds = [(min(w[1] for w in row), max(w[3] for w in row)) for row in rows]
+    gaps = [(bottom, top) for (_, bottom), (top, _) in zip(bounds, bounds[1:])]
+    return [(a + b) / 2 for a, b in gaps] if all(a < b for a, b in gaps) else []
+
+
+def _ruled_table_lines(page, clip, divider):
+    words = page.get_text('words', clip=clip)
+    headers = [word for word in words if _word_y(word) < divider]
+    rows = _body_rows(word for word in words if _word_y(word) > divider)
+    if not headers or len(rows) < 2:
+        return None
+    gutters = _numeric_gutters(rows)
+    if not gutters or (len(rows) + 1) * (len(gutters) + 1) > MAX_CELLS:
+        return None
+    gaps = _row_gaps(rows)
+    if not gaps or any(word[0] < cut < word[2] for word in headers for cut in gutters):
+        return None
+    return gutters, gaps
+
+
+def _ruled_numeric_tables(page, existing):
+    """Three-rule tables have a header rule and repeated, aligned numeric body columns."""
+    for left, right, top, divider, bottom in _ruled_regions(page):
+        clip = pymupdf.Rect(left - 1, top, right + 1, bottom)
+        if any(clip.intersects(pymupdf.Rect(table['bbox'])) for table in existing):
+            continue
+        lines = _ruled_table_lines(page, clip, divider)
+        if lines:
+            gutters, gaps = lines
+            finder = page.find_tables(
+                clip=clip, vertical_strategy='explicit', horizontal_strategy='explicit',
+                vertical_lines=[left, *gutters, right], horizontal_lines=[top, divider, *gaps, bottom],
+            )
+            yield from finder.tables
+
+
 def _collect_tables(page, spans=None):
     found = _find_tables(page)
     tables, failed = [], False
@@ -228,6 +318,15 @@ def _collect_tables(page, spans=None):
             continue
         if payload:
             tables.append(payload)
+    try:
+        for table in _ruled_numeric_tables(page, tables):
+            if len(tables) >= MAX_TABLES_PER_PAGE:
+                return tables, True
+            payload = _table_from_engine(table, spans=spans)
+            if payload:
+                tables.append(payload)
+    except (RuntimeError, ValueError):
+        failed = True
     return tables, failed
 
 

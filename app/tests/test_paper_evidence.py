@@ -126,6 +126,31 @@ class EvidenceStoreTests(unittest.TestCase):
         self.assertNotIn('"cells"', listed)
         self.assertNotIn('span', listed)
 
+    def test_horizontal_rules_keep_adjacent_numeric_cells_under_their_headings(self):
+        document = pymupdf.open()
+        page = document.new_page()
+        for y in (60, 91, 167):
+            page.draw_line((55, y), (272, y))
+        headings = ('Faith.', 'Ans. Rel.', 'Cont. Rel.')
+        for x, heading in zip((131, 172, 222), headings):
+            page.insert_text((x, 80), heading, fontsize=9)
+        for y, values in ((111, ('Ragas', '0.65', '0.48', '0.70')),
+                          (138, ('GPT Score', '0.72', '0.52', '0.63'))):
+            for x, value in zip((61, 136, 181, 237), values):
+                page.insert_text((x, y), value, fontsize=10)
+        page.insert_text((310, 111), 'The nearby paragraph includes 0.48.', fontsize=10)
+        page.insert_text((55, 182), 'Table 1: Agreement with human annotators.', fontsize=9)
+        pdf = document.tobytes()
+        document.close()
+
+        store = pe.EvidenceStore()
+        paper = store.prepare(pdf, sha(pdf))
+        items = store.list_items(paper['paperId'], kind='table')['items']
+        self.assertEqual(len(items), 1)
+        cells = store.read_item(paper['paperId'], items[0]['id'])['table']['cells']
+        self.assertEqual([c['text'] for c in cells if c['row'] == 0][1:], list(headings))
+        self.assertEqual([c['text'] for c in cells if c['row'] == 1], ['Ragas', '0.65', '0.48', '0.70'])
+
     def test_repeat_same_hash_reuses_and_other_hash_is_new(self):
         first = self.prepare()
         second = self.prepare()
